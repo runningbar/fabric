@@ -2,6 +2,8 @@
 **Note:** This is a **read-only mirror** of the formal [Gerrit](https://gerrit.hyperledger.org/r/#/admin/projects/fabric) repository,
 where active development is ongoing. Issue tracking is handled in [Jira](https://jira.hyperledger.org/secure/RapidBoard.jspa?projectKey=FAB&rapidView=5&view=planning)
 
+**说明：** 这是官方[Gerrit](https://gerrit.hyperledger.org/r/#/admin/projects/fabric)仓库的一个**只读镜像**，目前尚处于开发中。问题追踪放在[Jira](https://jira.hyperledger.org/secure/RapidBoard.jspa?projectKey=FAB&rapidView=5&view=planning)上处理
+
 ## Status
 
 This project is an _Active_ Hyperledger project. For more information on the history of this project see the [Fabric wiki page](https://wiki.hyperledger.org/projects/fabric.md#history). Information on what _Active_ entails can be found in

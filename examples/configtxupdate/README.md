@@ -45,7 +45,7 @@ For instance, re-encode the block saved as `configuration_block.json`, run the c
 curl -X POST --data-binary @configuration_block.json http://127.0.0.1:7059/protolator/encode/common.Block
 ```
 
-Any of the configuration related protos, including `common.Block`, `common.Envelope`, `common.ConfigEnvelope`, `common.ConfigUpdateEnvelope`, `common.Configuration`, and `common.ConfigUpdate` are valid targets for these URLs.  In the future, other proto decoding types may be added, such as for endorser transactions.
+Any of the configuration related protos, including `common.Block`, `common.Envelope`, `common.ConfigEnvelope`, `common.ConfigUpdateEnvelope`, `common.Config`, and `common.ConfigUpdate` are valid targets for these URLs.  In the future, other proto decoding types may be added, such as for endorser transactions.
 
 ## Config update computation
 
@@ -81,7 +81,7 @@ CGO_CFLAGS=" " GOBIN=/home/yellickj/go/src/github.com/hyperledger/fabric/build/b
 Binary available as build/bin/configtxgen
 ```
 
-It is recommended to run the example by invoking the script `fabric/example/configtxupdate/bootstrap_batchsize/script.sh` as follows:
+It is recommended to run the example by invoking the script `fabric/examples/configtxupdate/bootstrap_batchsize/script.sh` as follows:
 
 ```
 INTERACTIVE=true ./script.sh
@@ -106,14 +106,14 @@ Edit the `genesis_block.json` file in your favorite JSON editor, or manipulate i
 ```
 $ export MAXBATCHSIZEPATH=".data.data[0].payload.data.config.channel_group.groups.Orderer.values.BatchSize.value.max_message_count"
 # Display the old batch size
-$ jq "$MAXBATCHSIZEPATH" genesis_block.json 
+$ jq "$MAXBATCHSIZEPATH" genesis_block.json
 10
 
 # Set the new batch size
 $ jq "$MAXBATCHSIZEPATH = 20" genesis_block.json  > updated_genesis_block.json
 
 # Display the new batch size
-$ jq "$MAXBATCHSIZEPATH" updated_genesis_block.json 
+$ jq "$MAXBATCHSIZEPATH" updated_genesis_block.json
 20
 ```
 The genesis block is now ready to be re-encoded into the native proto form to be used for bootstrapping.
@@ -160,7 +160,7 @@ ORDERER_GENERAL_LOGLEVEL=debug orderer
 
 Reconfiguring a channel can be performed in a very similar way to modifying a genesis config.
 
-The recommended path to proceed with this example is to run the script located at `fabric/example/configtxupdate/reconfigure_batchsize/script.sh` by invoking
+The recommended path to proceed with this example is to run the script located at `fabric/examples/configtxupdate/reconfigure_batchsize/script.sh` by invoking
 
 ```
 INTERACTIVE=true ./script.sh
@@ -281,7 +281,7 @@ CGO_CFLAGS=" " GOBIN=/home/yellickj/go/src/github.com/hyperledger/fabric/build/b
 Binary available as build/bin/orderer
 ```
 
-Start the orderer using the `SampleDevModSolo` profile option.
+Start the orderer using the `SampleDevModeSolo` profile option.
 
 ```
 ORDERER_GENERAL_LOGLEVEL=debug ORDERER_GENERAL_GENESISPROFILE=SampleDevModeSolo orderer

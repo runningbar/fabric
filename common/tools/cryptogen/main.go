@@ -61,9 +61,15 @@ type NodeTemplate struct {
 }
 
 type NodeSpec struct {
-	Hostname   string   `yaml:"Hostname"`
-	CommonName string   `yaml:"CommonName"`
-	SANS       []string `yaml:"SANS"`
+	Hostname           string   `yaml:"Hostname"`
+	CommonName         string   `yaml:"CommonName"`
+	Country            string   `yaml:"Country"`
+	Province           string   `yaml:"Province"`
+	Locality           string   `yaml:"Locality"`
+	OrganizationalUnit string   `yaml:"OrganizationalUnit"`
+	StreetAddress      string   `yaml:"StreetAddress"`
+	PostalCode         string   `yaml:"PostalCode"`
+	SANS               []string `yaml:"SANS"`
 }
 
 type UsersSpec struct {
@@ -119,6 +125,12 @@ PeerOrgs:
     # ---------------------------------------------------------------------------
     # CA:
     #    Hostname: ca # implicitly ca.org1.example.com
+    #    Country: US
+    #    Province: California
+    #    Locality: San Francisco
+    #    OrganizationalUnit: Hyperledger Fabric
+    #    StreetAddress: address for org # default nil
+    #    PostalCode: postalCode for org # default nil
 
     # ---------------------------------------------------------------------------
     # "Specs"
@@ -136,8 +148,10 @@ PeerOrgs:
     #                 which obtains its values from the Spec.Hostname and
     #                 Org.Domain, respectively.
     #   - SANS:       (Optional) Specifies one or more Subject Alternative Names
-    #                 the be set in the resulting x509.  Accepts template
-    #                 variables {{.Hostname}}, {{.Domain}}, {{.CommonName}}
+    #                 to be set in the resulting x509. Accepts template
+    #                 variables {{.Hostname}}, {{.Domain}}, {{.CommonName}}. IP
+    #                 addresses provided here will be properly recognized. Other
+    #                 values will be taken as DNS names.
     #                 NOTE: Two implicit entries are created for you:
     #                     - {{ .CommonName }}
     #                     - {{ .Hostname }}
@@ -149,6 +163,7 @@ PeerOrgs:
     #       - "bar.{{.Domain}}"
     #       - "altfoo.{{.Domain}}"
     #       - "{{.Hostname}}.org6.net"
+    #       - 172.16.10.31
     #   - Hostname: bar
     #   - Hostname: baz
 
@@ -390,13 +405,13 @@ func generatePeerOrg(baseDir string, orgSpec OrgSpec) {
 	usersDir := filepath.Join(orgDir, "users")
 	adminCertsDir := filepath.Join(mspDir, "admincerts")
 	// generate signing CA
-	signCA, err := ca.NewCA(caDir, orgName, orgSpec.CA.CommonName)
+	signCA, err := ca.NewCA(caDir, orgName, orgSpec.CA.CommonName, orgSpec.CA.Country, orgSpec.CA.Province, orgSpec.CA.Locality, orgSpec.CA.OrganizationalUnit, orgSpec.CA.StreetAddress, orgSpec.CA.PostalCode)
 	if err != nil {
 		fmt.Printf("Error generating signCA for org %s:\n%v\n", orgName, err)
 		os.Exit(1)
 	}
 	// generate TLS CA
-	tlsCA, err := ca.NewCA(tlsCADir, orgName, "tls"+orgSpec.CA.CommonName)
+	tlsCA, err := ca.NewCA(tlsCADir, orgName, "tls"+orgSpec.CA.CommonName, orgSpec.CA.Country, orgSpec.CA.Province, orgSpec.CA.Locality, orgSpec.CA.OrganizationalUnit, orgSpec.CA.StreetAddress, orgSpec.CA.PostalCode)
 	if err != nil {
 		fmt.Printf("Error generating tlsCA for org %s:\n%v\n", orgName, err)
 		os.Exit(1)
@@ -493,13 +508,13 @@ func generateOrdererOrg(baseDir string, orgSpec OrgSpec) {
 	usersDir := filepath.Join(orgDir, "users")
 	adminCertsDir := filepath.Join(mspDir, "admincerts")
 	// generate signing CA
-	signCA, err := ca.NewCA(caDir, orgName, orgSpec.CA.CommonName)
+	signCA, err := ca.NewCA(caDir, orgName, orgSpec.CA.CommonName, orgSpec.CA.Country, orgSpec.CA.Province, orgSpec.CA.Locality, orgSpec.CA.OrganizationalUnit, orgSpec.CA.StreetAddress, orgSpec.CA.PostalCode)
 	if err != nil {
 		fmt.Printf("Error generating signCA for org %s:\n%v\n", orgName, err)
 		os.Exit(1)
 	}
 	// generate TLS CA
-	tlsCA, err := ca.NewCA(tlsCADir, orgName, "tls"+orgSpec.CA.CommonName)
+	tlsCA, err := ca.NewCA(tlsCADir, orgName, "tls"+orgSpec.CA.CommonName, orgSpec.CA.Country, orgSpec.CA.Province, orgSpec.CA.Locality, orgSpec.CA.OrganizationalUnit, orgSpec.CA.StreetAddress, orgSpec.CA.PostalCode)
 	if err != nil {
 		fmt.Printf("Error generating tlsCA for org %s:\n%v\n", orgName, err)
 		os.Exit(1)

@@ -9,7 +9,6 @@ package comm
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -91,8 +90,26 @@ type grpcServerImpl struct {
 }
 
 //NewGRPCServer creates a new implementation of a GRPCServer given a
-//listen address.
+//listen address
 func NewGRPCServer(address string, secureConfig SecureServerConfig) (GRPCServer, error) {
+	return newGRPCServerWithKa(address, secureConfig, &keepaliveOptions)
+}
+
+//NewChaincodeGRPCServer creates a new implementation of a chaincode GRPCServer given a
+//listen address
+func NewChaincodeGRPCServer(address string, secureConfig SecureServerConfig) (GRPCServer, error) {
+	return newGRPCServerWithKa(address, secureConfig, &chaincodeKeepaliveOptions)
+}
+
+//NewGRPCServerFromListener creates a new implementation of a GRPCServer given
+//an existing net.Listener instance using default keepalive
+func NewGRPCServerFromListener(listener net.Listener, secureConfig SecureServerConfig) (GRPCServer, error) {
+	return newGRPCServerFromListenerWithKa(listener, secureConfig, &keepaliveOptions)
+}
+
+//newGRPCServerWithKa creates a new implementation of a GRPCServer given a
+//listen address with specified keepalive options
+func newGRPCServerWithKa(address string, secureConfig SecureServerConfig, ka *KeepaliveOptions) (GRPCServer, error) {
 
 	if address == "" {
 		return nil, errors.New("Missing address parameter")
@@ -104,14 +121,13 @@ func NewGRPCServer(address string, secureConfig SecureServerConfig) (GRPCServer,
 		return nil, err
 	}
 
-	return NewGRPCServerFromListener(lis, secureConfig)
+	return newGRPCServerFromListenerWithKa(lis, secureConfig, ka)
 
 }
 
-//NewGRPCServerFromListener creates a new implementation of a GRPCServer given
-//an existing net.Listener instance.
-func NewGRPCServerFromListener(listener net.Listener, secureConfig SecureServerConfig) (GRPCServer, error) {
-
+//newGRPCServerFromListenerWithKa creates a new implementation of a GRPCServer given
+//an existing net.Listener instance with specfied keepalive
+func newGRPCServerFromListenerWithKa(listener net.Listener, secureConfig SecureServerConfig, ka *KeepaliveOptions) (GRPCServer, error) {
 	grpcServer := &grpcServerImpl{
 		address:  listener.Addr().String(),
 		listener: listener,
@@ -141,7 +157,7 @@ func NewGRPCServerFromListener(listener net.Listener, secureConfig SecureServerC
 				SessionTicketsDisabled: true,
 			}
 			grpcServer.tlsConfig.ClientAuth = tls.RequestClientCert
-			//checkif client authentication is required
+			//check if client authentication is required
 			if secureConfig.RequireClientCert {
 				//require TLS client auth
 				grpcServer.tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
@@ -170,7 +186,7 @@ func NewGRPCServerFromListener(listener net.Listener, secureConfig SecureServerC
 	serverOpts = append(serverOpts, grpc.MaxSendMsgSize(MaxSendMsgSize()))
 	serverOpts = append(serverOpts, grpc.MaxRecvMsgSize(MaxRecvMsgSize()))
 	// set the keepalive options
-	serverOpts = append(serverOpts, ServerKeepaliveOptions()...)
+	serverOpts = append(serverOpts, serverKeepaliveOptionsWithKa(ka)...)
 
 	grpcServer.server = grpc.NewServer(serverOpts...)
 
@@ -331,34 +347,4 @@ func (gServer *grpcServerImpl) SetClientRootCAs(clientRoots [][]byte) error {
 	//replace the current ClientCAs pool
 	gServer.tlsConfig.ClientCAs = certPool
 	return nil
-}
-
-//utility function to parse PEM-encoded certs
-func pemToX509Certs(pemCerts []byte) ([]*x509.Certificate, []string, error) {
-
-	//it's possible that multiple certs are encoded
-	certs := []*x509.Certificate{}
-	subjects := []string{}
-	for len(pemCerts) > 0 {
-		var block *pem.Block
-		block, pemCerts = pem.Decode(pemCerts)
-		if block == nil {
-			break
-		}
-		/** TODO: check why msp does not add type to PEM header
-		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
-			continue
-		}
-		*/
-
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return nil, subjects, err
-		} else {
-			certs = append(certs, cert)
-			//extract and append the subject
-			subjects = append(subjects, string(cert.RawSubject))
-		}
-	}
-	return certs, subjects, nil
 }

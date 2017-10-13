@@ -18,13 +18,14 @@ package configtx
 
 import (
 	"fmt"
-	"reflect"
 	"regexp"
 
 	"github.com/hyperledger/fabric/common/configtx/api"
 	"github.com/hyperledger/fabric/common/flogging"
 	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/utils"
+
+	"github.com/golang/protobuf/proto"
 )
 
 var logger = flogging.MustGetLogger("common/configtx")
@@ -48,10 +49,8 @@ type configSet struct {
 }
 
 type configManager struct {
-	api.Resources
-	callOnUpdate []func(api.Manager)
-	initializer  api.Initializer
-	current      *configSet
+	initializer api.Proposer
+	current     *configSet
 }
 
 // validateConfigID makes sure that the config element names (ie map key of
@@ -110,7 +109,7 @@ func validateChannelID(channelID string) error {
 	return nil
 }
 
-func NewManagerImpl(envConfig *cb.Envelope, initializer api.Initializer, callOnUpdate []func(api.Manager)) (api.Manager, error) {
+func NewManagerImpl(envConfig *cb.Envelope, initializer api.Proposer) (api.Manager, error) {
 	if envConfig == nil {
 		return nil, fmt.Errorf("Nil envelope")
 	}
@@ -133,13 +132,12 @@ func NewManagerImpl(envConfig *cb.Envelope, initializer api.Initializer, callOnU
 		return nil, fmt.Errorf("Bad channel id: %s", err)
 	}
 
-	configMap, err := MapConfig(configEnv.Config.ChannelGroup)
+	configMap, err := MapConfig(configEnv.Config.ChannelGroup, initializer.RootGroupKey())
 	if err != nil {
 		return nil, fmt.Errorf("Error converting config to map: %s", err)
 	}
 
-	cm := &configManager{
-		Resources:   initializer,
+	return &configManager{
 		initializer: initializer,
 		current: &configSet{
 			sequence:  configEnv.Config.Sequence,
@@ -147,23 +145,7 @@ func NewManagerImpl(envConfig *cb.Envelope, initializer api.Initializer, callOnU
 			channelID: header.ChannelId,
 			configEnv: configEnv,
 		},
-		callOnUpdate: callOnUpdate,
-	}
-
-	result, err := cm.processConfig(configEnv.Config.ChannelGroup)
-	if err != nil {
-		return nil, err
-	}
-	result.commit()
-	cm.commitCallbacks()
-
-	return cm, nil
-}
-
-func (cm *configManager) commitCallbacks() {
-	for _, callback := range cm.callOnUpdate {
-		callback(cm)
-	}
+	}, nil
 }
 
 // ProposeConfigUpdate takes in an Envelope of type CONFIG_UPDATE and produces a
@@ -183,17 +165,10 @@ func (cm *configManager) proposeConfigUpdate(configtx *cb.Envelope) (*cb.ConfigE
 		return nil, fmt.Errorf("Error authorizing update: %s", err)
 	}
 
-	channelGroup, err := configMapToConfig(configMap)
+	channelGroup, err := configMapToConfig(configMap, cm.initializer.RootGroupKey())
 	if err != nil {
 		return nil, fmt.Errorf("Could not turn configMap back to channelGroup: %s", err)
 	}
-
-	result, err := cm.processConfig(channelGroup)
-	if err != nil {
-		return nil, fmt.Errorf("Error processing updated config: %s", err)
-	}
-
-	result.rollback()
 
 	return &cb.ConfigEnvelope{
 		Config: &cb.Config{
@@ -204,75 +179,39 @@ func (cm *configManager) proposeConfigUpdate(configtx *cb.Envelope) (*cb.ConfigE
 	}, nil
 }
 
-func (cm *configManager) prepareApply(configEnv *cb.ConfigEnvelope) (map[string]comparable, *configResult, error) {
+// Validate simulates applying a ConfigEnvelope to become the new config
+func (cm *configManager) Validate(configEnv *cb.ConfigEnvelope) error {
 	if configEnv == nil {
-		return nil, nil, fmt.Errorf("Attempted to apply config with nil envelope")
+		return fmt.Errorf("config envelope is nil")
 	}
 
 	if configEnv.Config == nil {
-		return nil, nil, fmt.Errorf("Config cannot be nil")
+		return fmt.Errorf("config envelope has nil config")
 	}
 
 	if configEnv.Config.Sequence != cm.current.sequence+1 {
-		return nil, nil, fmt.Errorf("Config at sequence %d, cannot prepare to update to %d", cm.current.sequence, configEnv.Config.Sequence)
+		return fmt.Errorf("config currently at sequence %d, cannot validate config at sequence %d", cm.current.sequence, configEnv.Config.Sequence)
 	}
 
 	configUpdateEnv, err := envelopeToConfigUpdate(configEnv.LastUpdate)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
 	configMap, err := cm.authorizeUpdate(configUpdateEnv)
 	if err != nil {
-		return nil, nil, err
-	}
-
-	channelGroup, err := configMapToConfig(configMap)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Could not turn configMap back to channelGroup: %s", err)
-	}
-
-	if !reflect.DeepEqual(channelGroup, configEnv.Config.ChannelGroup) {
-		return nil, nil, fmt.Errorf("ConfigEnvelope LastUpdate did not produce the supplied config result")
-	}
-
-	result, err := cm.processConfig(channelGroup)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return configMap, result, nil
-}
-
-// Validate simulates applying a ConfigEnvelope to become the new config
-func (cm *configManager) Validate(configEnv *cb.ConfigEnvelope) error {
-	_, result, err := cm.prepareApply(configEnv)
-	if err != nil {
 		return err
 	}
 
-	result.rollback()
-
-	return nil
-}
-
-// Apply attempts to apply a ConfigEnvelope to become the new config
-func (cm *configManager) Apply(configEnv *cb.ConfigEnvelope) error {
-	configMap, result, err := cm.prepareApply(configEnv)
+	channelGroup, err := configMapToConfig(configMap, cm.initializer.RootGroupKey())
 	if err != nil {
-		return err
+		return fmt.Errorf("Could not turn configMap back to channelGroup: %s", err)
 	}
 
-	result.commit()
-
-	cm.current = &configSet{
-		configMap: configMap,
-		channelID: cm.current.channelID,
-		sequence:  configEnv.Config.Sequence,
-		configEnv: configEnv,
+	// reflect.Equal will not work here, because it considers nil and empty maps as different
+	if !proto.Equal(channelGroup, configEnv.Config.ChannelGroup) {
+		return fmt.Errorf("ConfigEnvelope LastUpdate did not produce the supplied config result")
 	}
-
-	cm.commitCallbacks()
 
 	return nil
 }

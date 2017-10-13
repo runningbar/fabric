@@ -20,12 +20,18 @@ import (
 
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/localmsp"
+	"github.com/hyperledger/fabric/common/viperutil"
 	"github.com/hyperledger/fabric/core"
+	"github.com/hyperledger/fabric/core/aclmgmt"
 	"github.com/hyperledger/fabric/core/chaincode"
+	"github.com/hyperledger/fabric/core/chaincode/accesscontrol"
 	"github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/config"
 	"github.com/hyperledger/fabric/core/endorser"
+	authHandler "github.com/hyperledger/fabric/core/handlers/auth"
+	"github.com/hyperledger/fabric/core/handlers/library"
+	"github.com/hyperledger/fabric/core/ledger/customtx"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/scc"
@@ -35,11 +41,19 @@ import (
 	"github.com/hyperledger/fabric/peer/common"
 	peergossip "github.com/hyperledger/fabric/peer/gossip"
 	"github.com/hyperledger/fabric/peer/version"
+	cb "github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/protos/ledger/rwset"
 	pb "github.com/hyperledger/fabric/protos/peer"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
+)
+
+const (
+	chaincodeListenAddrKey = "peer.chaincodeListenAddress"
+	defaultChaincodePort   = 7052
 )
 
 //function used by chaincode support
@@ -80,12 +94,18 @@ var nodeStartCmd = &cobra.Command{
 func initSysCCs() {
 	//deploy system chaincodes
 	scc.DeploySysCCs("")
-	logger.Infof("Deployed system chaincodess")
+	logger.Infof("Deployed system chaincodes")
 }
 
 func serve(args []string) error {
 	logger.Infof("Starting %s", version.GetInfo())
-	ledgermgmt.Initialize()
+
+	//aclmgmt initializes a proxy Processor that will be redirected to RSCC provider
+	//or default ACL Provider (for 1.0 behavior if RSCC is not enabled or available)
+	txprocessors := customtx.Processors{cb.HeaderType_CONFIG: aclmgmt.GetConfigTxProcessor()}
+
+	ledgermgmt.Initialize(txprocessors)
+
 	// Parameter overrides must be processed before any parameters are
 	// cached. Failures to cache cause the server to terminate immediately.
 	if chaincodeDevMode {
@@ -104,6 +124,11 @@ func serve(args []string) error {
 	if err != nil {
 		err = fmt.Errorf("Failed to get Peer Endpoint: %s", err)
 		return err
+	}
+	var peerHost string
+	peerHost, _, err = net.SplitHostPort(peerEndpoint.Address)
+	if err != nil {
+		return fmt.Errorf("peer address is not in the format of host:port: %v", err)
 	}
 
 	listenAddr := viper.GetString("peer.listenAddress")
@@ -133,8 +158,13 @@ func serve(args []string) error {
 	// enable the cache of chaincode info
 	ccprovider.EnableCCInfoCache()
 
-	ccSrv, ccEpFunc := createChaincodeServer(peerServer, listenAddr)
-	registerChaincodeSupport(ccSrv.Server(), ccEpFunc)
+	// Create a self-signed CA for chaincode service
+	ca, err := accesscontrol.NewCA()
+	if err != nil {
+		logger.Panic("Failed creating authentication layer:", err)
+	}
+	ccSrv, ccEpFunc := createChaincodeServer(ca.CertBytes(), peerHost)
+	registerChaincodeSupport(ccSrv, ccEpFunc, ca)
 	go ccSrv.Start()
 
 	logger.Debugf("Running peer")
@@ -142,9 +172,19 @@ func serve(args []string) error {
 	// Register the Admin server
 	pb.RegisterAdminServer(peerServer.Server(), core.NewAdminServer())
 
+	privDataDist := func(channel string, txID string, privateData *rwset.TxPvtReadWriteSet) error {
+		return service.GetGossipService().DistributePrivateData(channel, txID, privateData)
+	}
+
+	serverEndorser := endorser.NewEndorserServer(privDataDist)
+	libConf := library.Config{}
+	if err = viperutil.EnhancedExactUnmarshalKey("peer.handlers", &libConf); err != nil {
+		return errors.WithMessage(err, "could not load YAML config")
+	}
+	authFilters := library.InitRegistry(libConf).Lookup(library.Auth).([]authHandler.Filter)
+	auth := authHandler.ChainFilters(serverEndorser, authFilters...)
 	// Register the Endorser server
-	serverEndorser := endorser.NewEndorserServer()
-	pb.RegisterEndorserServer(peerServer.Server(), serverEndorser)
+	pb.RegisterEndorserServer(peerServer.Server(), auth)
 
 	// Initialize gossip component
 	bootstrap := viper.GetStringSlice("peer.gossip.bootstrap")
@@ -243,7 +283,7 @@ func serve(args []string) error {
 
 	// set the logging level for specific modules defined via environment
 	// variables or core.yaml
-	overrideLogModules := []string{"msp", "gossip", "ledger", "cauthdsl", "policies", "grpc"}
+	overrideLogModules := []string{"msp", "gossip", "ledger", "cauthdsl", "policies", "grpc", "peer.gossip"}
 	for _, module := range overrideLogModules {
 		err = common.SetLogLevelFromViper(module)
 		if err != nil {
@@ -258,51 +298,61 @@ func serve(args []string) error {
 }
 
 //create a CC listener using peer.chaincodeListenAddress (and if that's not set use peer.peerAddress)
-func createChaincodeServer(peerServer comm.GRPCServer, peerListenAddress string) (comm.GRPCServer, ccEndpointFunc) {
-	cclistenAddress := viper.GetString("peer.chaincodeListenAddress")
+func createChaincodeServer(caCert []byte, peerHostname string) (comm.GRPCServer, ccEndpointFunc) {
+	cclistenAddress := viper.GetString(chaincodeListenAddrKey)
+	if cclistenAddress == "" {
+		cclistenAddress = fmt.Sprintf("%s:%d", peerHostname, defaultChaincodePort)
+		logger.Warningf("%s is not set, using %s", chaincodeListenAddrKey, cclistenAddress)
+		viper.Set(chaincodeListenAddrKey, cclistenAddress)
+	}
 
 	var srv comm.GRPCServer
 	var ccEpFunc ccEndpointFunc
 
-	//use the chaincode address endpoint function..
-	//three cases
-	// -  peer.chaincodeListenAddress not specied (use peer's server)
-	// -  peer.chaincodeListenAddress identical to peer.listenAddress (use peer's server)
-	// -  peer.chaincodeListenAddress different and specified (create chaincode server)
-	if cclistenAddress == "" {
-		//...but log a warning
-		logger.Warningf("peer.chaincodeListenAddress is not set, use peer.listenAddress %s", peerListenAddress)
+	config, err := peer.GetSecureConfig()
+	if err != nil {
+		panic(err)
+	}
 
-		//we are using peer address, use peer endpoint
-		ccEpFunc = peer.GetPeerEndpoint
-		srv = peerServer
-	} else if cclistenAddress == peerListenAddress {
-		//using peer's endpoint...log a  warning
-		logger.Warningf("peer.chaincodeListenAddress is identical to peer.listenAddress %s", cclistenAddress)
+	if config.UseTLS {
+		config.RequireClientCert = true
+		config.ClientRootCAs = append(config.ClientRootCAs, caCert)
+	}
 
-		//we are using peer address, use peer endpoint
-		ccEpFunc = peer.GetPeerEndpoint
-		srv = peerServer
-	} else {
-		config, err := peer.GetSecureConfig()
+	srv, err = comm.NewChaincodeGRPCServer(cclistenAddress, config)
+	if err != nil {
+		panic(err)
+	}
+
+	ccEpFunc = func() (*pb.PeerEndpoint, error) {
+		//need this for the ID to create chaincode endpoint
+		peerEndpoint, err := peer.GetPeerEndpoint()
 		if err != nil {
-			panic(err)
+			return nil, err
 		}
 
-		srv, err = comm.NewGRPCServer(cclistenAddress, config)
-		if err != nil {
-			panic(err)
+		ccendpoint := viper.GetString(chaincodeListenAddrKey)
+		if ccendpoint == "" {
+			return nil, fmt.Errorf("%s not specified", chaincodeListenAddrKey)
 		}
-		ccEpFunc = getChaincodeAddressEndpoint
+
+		if _, _, err = net.SplitHostPort(ccendpoint); err != nil {
+			return nil, err
+		}
+
+		return &pb.PeerEndpoint{
+			Id:      peerEndpoint.Id,
+			Address: ccendpoint,
+		}, nil
 	}
 
 	return srv, ccEpFunc
 }
 
-//NOTE - when we implment JOIN we will no longer pass the chainID as param
+//NOTE - when we implement JOIN we will no longer pass the chainID as param
 //The chaincode support will come up without registering system chaincodes
 //which will be registered only during join phase.
-func registerChaincodeSupport(grpcServer *grpc.Server, ccEpFunc ccEndpointFunc) {
+func registerChaincodeSupport(grpcServer comm.GRPCServer, ccEpFunc ccEndpointFunc, ca accesscontrol.CA) {
 	//get user mode
 	userRunsCC := chaincode.IsDevMode()
 
@@ -315,34 +365,11 @@ func registerChaincodeSupport(grpcServer *grpc.Server, ccEpFunc ccEndpointFunc) 
 		logger.Debugf("Chaincode startup timeout value set to %s", ccStartupTimeout)
 	}
 
-	ccSrv := chaincode.NewChaincodeSupport(ccEpFunc, userRunsCC, ccStartupTimeout)
+	ccSrv := chaincode.NewChaincodeSupport(ccEpFunc, userRunsCC, ccStartupTimeout, ca)
 
 	//Now that chaincode is initialized, register all system chaincodes.
 	scc.RegisterSysCCs()
-
-	pb.RegisterChaincodeSupportServer(grpcServer, ccSrv)
-}
-
-func getChaincodeAddressEndpoint() (*pb.PeerEndpoint, error) {
-	//need this for the ID to create chaincode endpoint
-	peerEndpoint, err := peer.GetPeerEndpoint()
-	if err != nil {
-		return nil, err
-	}
-
-	ccendpoint := viper.GetString("peer.chaincodeListenAddress")
-	if ccendpoint == "" {
-		return nil, fmt.Errorf("peer.chaincodeListenAddress not specified")
-	}
-
-	if _, _, err = net.SplitHostPort(ccendpoint); err != nil {
-		return nil, err
-	}
-
-	return &pb.PeerEndpoint{
-		Id:      peerEndpoint.Id,
-		Address: ccendpoint,
-	}, nil
+	pb.RegisterChaincodeSupportServer(grpcServer.Server(), ccSrv)
 }
 
 func createEventHubServer(secureConfig comm.SecureServerConfig) (comm.GRPCServer, error) {

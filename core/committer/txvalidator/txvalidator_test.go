@@ -24,6 +24,7 @@ import (
 	"github.com/hyperledger/fabric/common/ledger/testutil"
 	util2 "github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/common/sysccprovider"
+	ledger2 "github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/ledger/util"
 	ledgerUtil "github.com/hyperledger/fabric/core/ledger/util"
@@ -37,44 +38,48 @@ import (
 	"github.com/hyperledger/fabric/protos/utils"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/sync/semaphore"
 )
 
-func TestBlockValidation(t *testing.T) {
-	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
-	ledgermgmt.InitializeTestEnv()
-	defer ledgermgmt.CleanupTestEnv()
-
-	gb, _ := test.MakeGenesisBlock("TestLedger")
-	gbHash := gb.Header.Hash()
-	ledger, _ := ledgermgmt.CreateLedger(gb)
-	defer ledger.Close()
-
-	simulator, _ := ledger.NewTxSimulator()
+func testValidationWithNTXes(t *testing.T, ledger ledger2.PeerLedger, gbHash []byte, nBlocks int) {
+	txid := util2.GenerateUUID()
+	simulator, _ := ledger.NewTxSimulator(txid)
 	simulator.SetState("ns1", "key1", []byte("value1"))
 	simulator.SetState("ns1", "key2", []byte("value2"))
 	simulator.SetState("ns1", "key3", []byte("value3"))
 	simulator.Done()
 
 	simRes, _ := simulator.GetTxSimulationResults()
-
-	_, err := testutil.ConstructBytesProposalResponsePayload("v1", simRes)
+	pubSimulationResBytes, _ := simRes.GetPubSimulationBytes()
+	_, err := testutil.ConstructBytesProposalResponsePayload("v1", pubSimulationResBytes)
 	if err != nil {
 		t.Fatalf("Could not construct ProposalResponsePayload bytes, err: %s", err)
 	}
 
 	mockVsccValidator := &validator.MockVsccValidator{}
-	tValidator := &txValidator{&mocktxvalidator.Support{LedgerVal: ledger}, mockVsccValidator}
+	vcs := struct {
+		*mocktxvalidator.Support
+		*semaphore.Weighted
+	}{&mocktxvalidator.Support{LedgerVal: ledger}, semaphore.NewWeighted(10)}
+	tValidator := &txValidator{vcs, mockVsccValidator}
 
 	bcInfo, _ := ledger.GetBlockchainInfo()
 	testutil.AssertEquals(t, bcInfo, &common.BlockchainInfo{
 		Height: 1, CurrentBlockHash: gbHash, PreviousBlockHash: nil})
 
-	block := testutil.ConstructBlock(t, 1, gbHash, [][]byte{simRes}, true)
+	sr := [][]byte{}
+	for i := 0; i < nBlocks; i++ {
+		sr = append(sr, pubSimulationResBytes)
+	}
+	block := testutil.ConstructBlock(t, 1, gbHash, sr, true)
 
 	tValidator.Validate(block)
 
 	txsfltr := util.TxValidationFlags(block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
-	assert.True(t, txsfltr.IsSetTo(0, peer.TxValidationCode_VALID))
+
+	for i := 0; i < nBlocks; i++ {
+		assert.True(t, txsfltr.IsSetTo(i, peer.TxValidationCode_VALID))
+	}
 
 	/*
 
@@ -98,6 +103,50 @@ func TestBlockValidation(t *testing.T) {
 	*/
 }
 
+func TestBlockValidation(t *testing.T) {
+	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
+	ledgermgmt.InitializeTestEnv()
+	defer ledgermgmt.CleanupTestEnv()
+
+	gb, _ := test.MakeGenesisBlock("TestLedger")
+	gbHash := gb.Header.Hash()
+	ledger, _ := ledgermgmt.CreateLedger(gb)
+	defer ledger.Close()
+
+	// here we test validation of a block with a single tx
+	testValidationWithNTXes(t, ledger, gbHash, 1)
+}
+
+func TestParallelBlockValidation(t *testing.T) {
+	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
+	ledgermgmt.InitializeTestEnv()
+	defer ledgermgmt.CleanupTestEnv()
+
+	gb, _ := test.MakeGenesisBlock("TestLedger")
+	gbHash := gb.Header.Hash()
+	ledger, _ := ledgermgmt.CreateLedger(gb)
+	defer ledger.Close()
+
+	// here we test validation of a block with 128 txes
+	testValidationWithNTXes(t, ledger, gbHash, 128)
+}
+
+func TestVeryLargeParallelBlockValidation(t *testing.T) {
+	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
+	ledgermgmt.InitializeTestEnv()
+	defer ledgermgmt.CleanupTestEnv()
+
+	gb, _ := test.MakeGenesisBlock("TestLedger")
+	gbHash := gb.Header.Hash()
+	ledger, _ := ledgermgmt.CreateLedger(gb)
+	defer ledger.Close()
+
+	// here we test validation of a block with 4096 txes,
+	// which is larger than both the number of workers in
+	// the pool and the buffer in the channels
+	testValidationWithNTXes(t, ledger, gbHash, 4096)
+}
+
 func TestNewTxValidator_DuplicateTransactions(t *testing.T) {
 	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
 	ledgermgmt.InitializeTestEnv()
@@ -108,7 +157,11 @@ func TestNewTxValidator_DuplicateTransactions(t *testing.T) {
 
 	defer ledger.Close()
 
-	tValidator := &txValidator{&mocktxvalidator.Support{LedgerVal: ledger}, &validator.MockVsccValidator{}}
+	vcs := struct {
+		*mocktxvalidator.Support
+		*semaphore.Weighted
+	}{&mocktxvalidator.Support{LedgerVal: ledger}, semaphore.NewWeighted(10)}
+	tValidator := &txValidator{vcs, &validator.MockVsccValidator{}}
 
 	// Create simple endorsement transaction
 	payload := &common.Payload{
@@ -152,7 +205,9 @@ func TestNewTxValidator_DuplicateTransactions(t *testing.T) {
 	// Initialize metadata
 	utils.InitBlockMetadata(block)
 	// Commit block to the ledger
-	ledger.Commit(block)
+	ledger.CommitWithPvtData(&ledger2.BlockAndPvtData{
+		Block: block,
+	})
 
 	// Validation should invalidate transaction,
 	// because it's already committed

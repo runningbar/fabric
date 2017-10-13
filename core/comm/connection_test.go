@@ -73,6 +73,23 @@ func TestConnection_Correct(t *testing.T) {
 	tmpConn.Close()
 }
 
+func TestChaincodeConnection_Correct(t *testing.T) {
+	testutil.SetupTestConfig()
+	viper.Set("ledger.blockchain.deploy-system-chaincode", "false")
+	peerAddress := GetPeerTestingAddress("7052")
+	var tmpConn *grpc.ClientConn
+	var err error
+	if TLSEnabled() {
+		tmpConn, err = NewChaincodeClientConnectionWithAddress(peerAddress, true, true, InitTLSForPeer())
+	}
+	tmpConn, err = NewChaincodeClientConnectionWithAddress(peerAddress, true, false, nil)
+	if err != nil {
+		t.Fatalf("error connection to server at host:port = %s\n", peerAddress)
+	}
+
+	tmpConn.Close()
+}
+
 func TestConnection_WrongAddress(t *testing.T) {
 	testutil.SetupTestConfig()
 	viper.Set("ledger.blockchain.deploy-system-chaincode", "false")
@@ -84,6 +101,24 @@ func TestConnection_WrongAddress(t *testing.T) {
 		tmpConn, err = NewClientConnectionWithAddress(peerAddress, true, true, InitTLSForPeer())
 	}
 	tmpConn, err = NewClientConnectionWithAddress(peerAddress, true, false, nil)
+	if err == nil {
+		fmt.Printf("error connection to server -  at host:port = %s\n", peerAddress)
+		t.Error("error connection to server - connection should fail")
+		tmpConn.Close()
+	}
+}
+
+func TestChaincodeConnection_WrongAddress(t *testing.T) {
+	testutil.SetupTestConfig()
+	viper.Set("ledger.blockchain.deploy-system-chaincode", "false")
+	//some random port
+	peerAddress := GetPeerTestingAddress("10287")
+	var tmpConn *grpc.ClientConn
+	var err error
+	if TLSEnabled() {
+		tmpConn, err = NewChaincodeClientConnectionWithAddress(peerAddress, true, true, InitTLSForPeer())
+	}
+	tmpConn, err = NewChaincodeClientConnectionWithAddress(peerAddress, true, false, nil)
 	if err == nil {
 		fmt.Printf("error connection to server -  at host:port = %s\n", peerAddress)
 		t.Error("error connection to server - connection should fail")
@@ -124,7 +159,7 @@ func TestCASupport(t *testing.T) {
 	cas.AppRootCAsByChain["channel1"] = [][]byte{rootCAs[0]}
 	cas.AppRootCAsByChain["channel2"] = [][]byte{rootCAs[1]}
 	cas.AppRootCAsByChain["channel3"] = [][]byte{rootCAs[2]}
-	cas.OrdererRootCAsByChain["channel1"] = [][]byte{(rootCAs[3])}
+	cas.OrdererRootCAsByChain["channel1"] = [][]byte{rootCAs[3]}
 	cas.OrdererRootCAsByChain["channel2"] = [][]byte{rootCAs[4]}
 	cas.ServerRootCAs = [][]byte{rootCAs[5]}
 	cas.ClientRootCAs = [][]byte{rootCAs[5]}

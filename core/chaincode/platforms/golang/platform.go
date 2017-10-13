@@ -102,7 +102,7 @@ func (goPlatform *Platform) ValidateSpec(spec *pb.ChaincodeSpec) error {
 		return fmt.Errorf("invalid path: %s", err)
 	}
 
-	//we have no real good way of checking existence of remote urls except by downloading and testin
+	//we have no real good way of checking existence of remote urls except by downloading and testing
 	//which we do later anyway. But we *can* - and *should* - test for existence of local paths.
 	//Treat empty scheme as a local filesystem path
 	if path.Scheme == "" {
@@ -116,7 +116,7 @@ func (goPlatform *Platform) ValidateSpec(spec *pb.ChaincodeSpec) error {
 			return fmt.Errorf("error validating chaincode path: %s", err)
 		}
 		if !exists {
-			return fmt.Errorf("path to chaincode does not exist: %s", spec.ChaincodeId.Path)
+			return fmt.Errorf("path to chaincode does not exist: %s", pathToCheck)
 		}
 	}
 	return nil
@@ -290,10 +290,21 @@ func (goPlatform *Platform) GetDeploymentPayload(spec *pb.ChaincodeSpec) ([]byte
 		"github.com/hyperledger/fabric/protos/peer":         true,
 	}
 
+	// Golang "pseudo-packages" - packages which don't actually exist
+	var pseudo = map[string]bool{
+		"C": true,
+	}
+
 	imports = filter(imports, func(pkg string) bool {
 		// Drop if provided by CCENV
 		if _, ok := provided[pkg]; ok == true {
 			logger.Debugf("Discarding provided package %s", pkg)
+			return false
+		}
+
+		// Drop pseudo-packages
+		if _, ok := pseudo[pkg]; ok == true {
+			logger.Debugf("Discarding pseudo-package %s", pkg)
 			return false
 		}
 

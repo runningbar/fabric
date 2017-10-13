@@ -2,7 +2,7 @@ End-to-End Flow
 ===============
 
 The end-to-end verification provisions a sample Fabric network consisting of
-two organizations, each maintaining two peers, and a “solo” ordering service.
+two organizations, each maintaining two peers, and a Kafka-based ordering service.
 
 This verification makes use of two fundamental tools, which are necessary to
 create a functioning transactional network with digital signature validation
@@ -26,7 +26,7 @@ Prerequisites
 - `Homebrew <https://brew.sh/>`__ - OSX only
 - `Xcode <https://itunes.apple.com/us/app/xcode/id497799835?mt=12>`__ - OSX only (this can take upwards of an hour)
 - `Docker Toolbox <https://docs.docker.com/toolbox/toolbox_install_windows/>`__ - Windows users only
-- `Go <https://golang.org/>`__ - 1.7 or higher
+- `Go <https://golang.org/>`__ - 1.9 or higher
 
 On Windows machines you will also need the following which provides a better alternative to the Windows command prompt:
 
@@ -910,4 +910,3 @@ back and recreate your channel artifacts.
 
 .. Licensed under Creative Commons Attribution 4.0 International License
    https://creativecommons.org/licenses/by/4.0/
-   

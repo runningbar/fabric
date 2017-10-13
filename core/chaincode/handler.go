@@ -26,18 +26,17 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/flogging"
 	commonledger "github.com/hyperledger/fabric/common/ledger"
-	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/common/util"
+	"github.com/hyperledger/fabric/core/aclmgmt"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/common/sysccprovider"
 	"github.com/hyperledger/fabric/core/container/ccintf"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/peer"
-	"github.com/hyperledger/fabric/core/policy"
-	"github.com/hyperledger/fabric/msp/mgmt"
 	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/looplab/fsm"
 	logging "github.com/op/go-logging"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
 
@@ -50,12 +49,6 @@ const (
 )
 
 var chaincodeLogger = flogging.MustGetLogger("chaincode")
-
-// MessageHandler interface for handling chaincode messages (common between Peer chaincode support and chaincode)
-type MessageHandler interface {
-	HandleMessage(msg *pb.ChaincodeMessage) error
-	SendMessage(msg *pb.ChaincodeMessage) error
-}
 
 type transactionContext struct {
 	chainID          string
@@ -101,8 +94,6 @@ type Handler struct {
 
 	// used to do Send after making sure the state transition is complete
 	nextState chan *nextStateInfo
-
-	policyChecker policy.PolicyChecker
 }
 
 func shorttxid(txid string) string {
@@ -161,13 +152,13 @@ func (handler *Handler) serialSend(msg *pb.ChaincodeMessage) error {
 
 	var err error
 	if err = handler.ChatStream.Send(msg); err != nil {
-		err = fmt.Errorf("[%s]Error sending %s: %s", shorttxid(msg.Txid), msg.Type.String(), err)
-		chaincodeLogger.Errorf("%s", err)
+		err = errors.WithMessage(err, fmt.Sprintf("[%s]Error sending %s", shorttxid(msg.Txid), msg.Type.String()))
+		chaincodeLogger.Errorf("%+v", err)
 	}
 	return err
 }
 
-//serialSendAsync serves the same purpose as serialSend (serializ msgs so gRPC will
+//serialSendAsync serves the same purpose as serialSend (serialize msgs so gRPC will
 //be happy). In addition, it is also asynchronous so send-remoterecv--localrecv loop
 //can be nonblocking. Only errors need to be handled and these are handled by
 //communication on supplied error channel. A typical use will be a non-blocking or
@@ -183,12 +174,12 @@ func (handler *Handler) serialSendAsync(msg *pb.ChaincodeMessage, errc chan erro
 
 func (handler *Handler) createTxContext(ctxt context.Context, chainID string, txid string, signedProp *pb.SignedProposal, prop *pb.Proposal) (*transactionContext, error) {
 	if handler.txCtxs == nil {
-		return nil, fmt.Errorf("cannot create notifier for txid:%s", txid)
+		return nil, errors.Errorf("cannot create notifier for txid: %s", txid)
 	}
 	handler.Lock()
 	defer handler.Unlock()
 	if handler.txCtxs[txid] != nil {
-		return nil, fmt.Errorf("txid:%s exists", txid)
+		return nil, errors.Errorf("txid: %s exists", txid)
 	}
 	txctx := &transactionContext{chainID: chainID, signedProp: signedProp,
 		proposal: prop, responseNotifier: make(chan *pb.ChaincodeMessage, 1),
@@ -238,7 +229,7 @@ func (handler *Handler) checkACL(signedProp *pb.SignedProposal, proposal *pb.Pro
 	// ensure that we don't invoke a system chaincode
 	// that is not invokable through a cc2cc invocation
 	if sysccprovider.GetSystemChaincodeProvider().IsSysCCAndNotInvokableCC2CC(ccIns.ChaincodeName) {
-		return fmt.Errorf("System chaincode %s cannot be invoked with a cc2cc invocation", ccIns.ChaincodeName)
+		return errors.Errorf("system chaincode %s cannot be invoked with a cc2cc invocation", ccIns.ChaincodeName)
 	}
 
 	// if we are here, all we know is that the invoked chaincode is either
@@ -255,10 +246,10 @@ func (handler *Handler) checkACL(signedProp *pb.SignedProposal, proposal *pb.Pro
 
 	// A Nil signedProp will be rejected for non-system chaincodes
 	if signedProp == nil {
-		return fmt.Errorf("Signed Proposal must not be nil from caller [%s]", ccIns.String())
+		return errors.Errorf("signed proposal must not be nil from caller [%s]", ccIns.String())
 	}
 
-	return handler.policyChecker.CheckPolicy(ccIns.ChainID, policies.ChannelApplicationWriters, signedProp)
+	return aclmgmt.GetACLProvider().CheckACL(aclmgmt.CC2CC, ccIns.ChainID, signedProp)
 }
 
 func (handler *Handler) deregister() error {
@@ -283,7 +274,7 @@ func (handler *Handler) waitForKeepaliveTimer() <-chan time.Time {
 		c := time.After(handler.chaincodeSupport.keepalive)
 		return c
 	}
-	//no one will signal this channel, listner blocks forever
+	//no one will signal this channel, listener blocks forever
 	c := make(chan time.Time, 1)
 	return c
 }
@@ -323,14 +314,14 @@ func (handler *Handler) processStream() error {
 		case in = <-msgAvail:
 			// Defer the deregistering of the this handler.
 			if err == io.EOF {
-				chaincodeLogger.Debugf("Received EOF, ending chaincode support stream, %s", err)
+				chaincodeLogger.Debugf("Received EOF, ending chaincode support stream: %+v", err)
 				return err
 			} else if err != nil {
-				chaincodeLogger.Errorf("Error handling chaincode support stream: %s", err)
+				chaincodeLogger.Errorf("Error handling chaincode support stream: %+v", err)
 				return err
 			} else if in == nil {
-				err = fmt.Errorf("Received nil message, ending chaincode support stream")
-				chaincodeLogger.Debug("Received nil message, ending chaincode support stream")
+				err = errors.New("received nil message, ending chaincode support stream")
+				chaincodeLogger.Debug("%+v", err)
 				return err
 			}
 			chaincodeLogger.Debugf("[%s]Received message %s from shim", shorttxid(in.Txid), in.Type.String())
@@ -350,8 +341,8 @@ func (handler *Handler) processStream() error {
 		case nsInfo = <-handler.nextState:
 			in = nsInfo.msg
 			if in == nil {
-				err = fmt.Errorf("Next state nil message, ending chaincode support stream")
-				chaincodeLogger.Debug("Next state nil message, ending chaincode support stream")
+				err = errors.New("next state nil message, ending chaincode support stream")
+				chaincodeLogger.Debug("%+v", err)
 				return err
 			}
 			chaincodeLogger.Debugf("[%s]Move state message %s", shorttxid(in.Txid), in.Type.String())
@@ -367,10 +358,11 @@ func (handler *Handler) processStream() error {
 			continue
 		}
 
-		err = handler.HandleMessage(in)
+		err = handler.handleMessage(in)
 		if err != nil {
-			chaincodeLogger.Errorf("[%s]Error handling message, ending stream: %s", shorttxid(in.Txid), err)
-			return fmt.Errorf("Error handling message, ending stream: %s", err)
+			err = errors.WithMessage(err, "error handling message, ending stream")
+			chaincodeLogger.Errorf("[%s] %+v", shorttxid(in.Txid), err)
+			return err
 		}
 
 		if nsInfo != nil && nsInfo.sendToCC {
@@ -381,7 +373,7 @@ func (handler *Handler) processStream() error {
 					panic(fmt.Sprintf("[%s]Sync send can only be for READY state %s\n", shorttxid(in.Txid), in.Type.String()))
 				}
 				if err = handler.serialSend(in); err != nil {
-					return fmt.Errorf("[%s]Error sending ready  message, ending stream: %s", shorttxid(in.Txid), err)
+					return errors.WithMessage(err, fmt.Sprintf("[%s]error sending ready  message, ending stream:", shorttxid(in.Txid)))
 				}
 			} else {
 				//if error bail in select
@@ -446,12 +438,6 @@ func newChaincodeSupportHandler(chaincodeSupport *ChaincodeSupport, peerChatStre
 		},
 	)
 
-	v.policyChecker = policy.NewPolicyChecker(
-		peer.NewChannelPolicyManagerGetter(),
-		mgmt.GetLocalMSP(),
-		mgmt.NewLocalMSPPrincipalGetter(),
-	)
-
 	return v
 }
 
@@ -510,13 +496,13 @@ func (handler *Handler) beforeRegisterEvent(e *fsm.Event, state string) {
 	chaincodeLogger.Debugf("Received %s in state %s", e.Event, state)
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	chaincodeID := &pb.ChaincodeID{}
 	err := proto.Unmarshal(msg.Payload, chaincodeID)
 	if err != nil {
-		e.Cancel(fmt.Errorf("Error in received %s, could NOT unmarshal registration info: %s", pb.ChaincodeMessage_REGISTER, err))
+		e.Cancel(errors.Wrap(err, fmt.Sprintf("error in received %s, could NOT unmarshal registration info", pb.ChaincodeMessage_REGISTER)))
 		return
 	}
 
@@ -524,7 +510,7 @@ func (handler *Handler) beforeRegisterEvent(e *fsm.Event, state string) {
 	handler.ChaincodeID = chaincodeID
 	err = handler.chaincodeSupport.registerHandler(handler)
 	if err != nil {
-		e.Cancel(err)
+		e.Cancel(errors.New(err.Error()))
 		handler.notifyDuringStartup(false)
 		return
 	}
@@ -535,7 +521,7 @@ func (handler *Handler) beforeRegisterEvent(e *fsm.Event, state string) {
 
 	chaincodeLogger.Debugf("Got %s for chaincodeID = %s, sending back %s", e.Event, chaincodeID, pb.ChaincodeMessage_REGISTERED)
 	if err := handler.serialSend(&pb.ChaincodeMessage{Type: pb.ChaincodeMessage_REGISTERED}); err != nil {
-		e.Cancel(fmt.Errorf("Error sending %s: %s", pb.ChaincodeMessage_REGISTERED, err))
+		e.Cancel(errors.WithMessage(err, fmt.Sprintf("error sending %s", pb.ChaincodeMessage_REGISTERED)))
 		handler.notifyDuringStartup(false)
 		return
 	}
@@ -562,7 +548,7 @@ func (handler *Handler) notify(msg *pb.ChaincodeMessage) {
 func (handler *Handler) beforeCompletedEvent(e *fsm.Event, state string) {
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	// Notify on channel once into READY state
@@ -574,7 +560,7 @@ func (handler *Handler) beforeCompletedEvent(e *fsm.Event, state string) {
 func (handler *Handler) afterGetState(e *fsm.Event, state string) {
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	chaincodeLogger.Debugf("[%s]Received %s, invoking get state from ledger", shorttxid(msg.Txid), pb.ChaincodeMessage_GET_STATE)
@@ -664,7 +650,7 @@ func (handler *Handler) handleGetState(msg *pb.ChaincodeMessage) {
 func (handler *Handler) afterGetStateByRange(e *fsm.Event, state string) {
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	chaincodeLogger.Debugf("Received %s, invoking get state from ledger", pb.ChaincodeMessage_GET_STATE_BY_RANGE)
@@ -721,7 +707,7 @@ func (handler *Handler) handleGetStateByRange(msg *pb.ChaincodeMessage) {
 				handler.deleteQueryIterator(txContext, iterID)
 			}
 			payload := []byte(err.Error())
-			chaincodeLogger.Errorf(errFmt, errArgs)
+			chaincodeLogger.Errorf(errFmt, errArgs...)
 			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: payload, Txid: msg.Txid}
 		}
 
@@ -795,7 +781,7 @@ func getQueryResponse(handler *Handler, txContext *transactionContext, iter comm
 func (handler *Handler) afterQueryStateNext(e *fsm.Event, state string) {
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	chaincodeLogger.Debugf("Received %s, invoking query state next from ledger", pb.ChaincodeMessage_QUERY_STATE_NEXT)
@@ -835,7 +821,7 @@ func (handler *Handler) handleQueryStateNext(msg *pb.ChaincodeMessage) {
 				iter.Close()
 				handler.deleteQueryIterator(txContext, queryStateNext.Id)
 			}
-			chaincodeLogger.Errorf(errFmt, errArgs)
+			chaincodeLogger.Errorf(errFmt, errArgs...)
 			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: payload, Txid: msg.Txid}
 		}
 
@@ -880,7 +866,7 @@ func (handler *Handler) handleQueryStateNext(msg *pb.ChaincodeMessage) {
 func (handler *Handler) afterQueryStateClose(e *fsm.Event, state string) {
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	chaincodeLogger.Debugf("Received %s, invoking query state close from ledger", pb.ChaincodeMessage_QUERY_STATE_CLOSE)
@@ -913,7 +899,7 @@ func (handler *Handler) handleQueryStateClose(msg *pb.ChaincodeMessage) {
 		}()
 
 		errHandler := func(payload []byte, errFmt string, errArgs ...interface{}) {
-			chaincodeLogger.Errorf(errFmt, errArgs)
+			chaincodeLogger.Errorf(errFmt, errArgs...)
 			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: payload, Txid: msg.Txid}
 		}
 
@@ -953,7 +939,7 @@ func (handler *Handler) handleQueryStateClose(msg *pb.ChaincodeMessage) {
 func (handler *Handler) afterGetQueryResult(e *fsm.Event, state string) {
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	chaincodeLogger.Debugf("Received %s, invoking get state from ledger", pb.ChaincodeMessage_GET_QUERY_RESULT)
@@ -993,7 +979,7 @@ func (handler *Handler) handleGetQueryResult(msg *pb.ChaincodeMessage) {
 				iter.Close()
 				handler.deleteQueryIterator(txContext, iterID)
 			}
-			chaincodeLogger.Errorf(errFmt, errArgs)
+			chaincodeLogger.Errorf(errFmt, errArgs...)
 			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: payload, Txid: msg.Txid}
 		}
 
@@ -1044,7 +1030,7 @@ func (handler *Handler) handleGetQueryResult(msg *pb.ChaincodeMessage) {
 func (handler *Handler) afterGetHistoryForKey(e *fsm.Event, state string) {
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	chaincodeLogger.Debugf("Received %s, invoking get state from ledger", pb.ChaincodeMessage_GET_HISTORY_FOR_KEY)
@@ -1084,7 +1070,7 @@ func (handler *Handler) handleGetHistoryForKey(msg *pb.ChaincodeMessage) {
 				iter.Close()
 				handler.deleteQueryIterator(txContext, iterID)
 			}
-			chaincodeLogger.Errorf(errFmt, errArgs)
+			chaincodeLogger.Errorf(errFmt, errArgs...)
 			serialSendMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: payload, Txid: msg.Txid}
 		}
 
@@ -1166,7 +1152,7 @@ func (handler *Handler) enterBusyState(e *fsm.Event, state string) {
 		}
 
 		errHandler := func(payload []byte, errFmt string, errArgs ...interface{}) {
-			chaincodeLogger.Errorf(errFmt, errArgs)
+			chaincodeLogger.Errorf(errFmt, errArgs...)
 			triggerNextStateMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR, Payload: payload, Txid: msg.Txid}
 		}
 
@@ -1231,7 +1217,7 @@ func (handler *Handler) enterBusyState(e *fsm.Event, state string) {
 						Payload: []byte(payload), Txid: msg.Txid}
 					return
 				}
-				txsim2, err2 := lgr.NewTxSimulator()
+				txsim2, err2 := lgr.NewTxSimulator(msg.Txid)
 				if err2 != nil {
 					triggerNextStateMsg = &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_ERROR,
 						Payload: []byte(err2.Error()), Txid: msg.Txid}
@@ -1259,13 +1245,13 @@ func (handler *Handler) enterBusyState(e *fsm.Event, state string) {
 				//Call LSCC to get the called chaincode artifacts
 				cd, err = GetChaincodeDataFromLSCC(ctxt, msg.Txid, txContext.signedProp, txContext.proposal, calledCcIns.ChainID, calledCcIns.ChaincodeName)
 				if err != nil {
-					errHandler([]byte(err.Error()), "[%s]Failed to get chaincoed data (%s) for invoked chaincode. Sending %s", shorttxid(msg.Txid), err, pb.ChaincodeMessage_ERROR)
+					errHandler([]byte(err.Error()), "[%s]Failed to get chaincode data (%s) for invoked chaincode. Sending %s", shorttxid(msg.Txid), err, pb.ChaincodeMessage_ERROR)
 					return
 				}
 
 				err = ccprovider.CheckInsantiationPolicy(calledCcIns.ChaincodeName, cd.Version, cd)
 				if err != nil {
-					errHandler([]byte(err.Error()), "[%s]CheckInsantiationPolicy, error %s. Sending %s", shorttxid(msg.Txid), err, pb.ChaincodeMessage_ERROR)
+					errHandler([]byte(err.Error()), "[%s]CheckInstantiationPolicy, error %s. Sending %s", shorttxid(msg.Txid), err, pb.ChaincodeMessage_ERROR)
 					return
 				}
 			} else {
@@ -1326,7 +1312,7 @@ func (handler *Handler) enterReadyState(e *fsm.Event, state string) {
 	// Now notify
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	chaincodeLogger.Debugf("[%s]Entered state %s", shorttxid(msg.Txid), state)
@@ -1338,12 +1324,12 @@ func (handler *Handler) enterEndState(e *fsm.Event, state string) {
 	// Now notify
 	msg, ok := e.Args[0].(*pb.ChaincodeMessage)
 	if !ok {
-		e.Cancel(fmt.Errorf("Received unexpected message type"))
+		e.Cancel(errors.New("received unexpected message type"))
 		return
 	}
 	chaincodeLogger.Debugf("[%s]Entered state %s", shorttxid(msg.Txid), state)
 	handler.notify(msg)
-	e.Cancel(fmt.Errorf("Entered end state"))
+	e.Cancel(errors.New("entered end state"))
 }
 
 func (handler *Handler) setChaincodeProposal(signedProp *pb.SignedProposal, prop *pb.Proposal, msg *pb.ChaincodeMessage) error {
@@ -1353,7 +1339,7 @@ func (handler *Handler) setChaincodeProposal(signedProp *pb.SignedProposal, prop
 
 		// Check that also signedProp is different from nil
 		if signedProp == nil {
-			return fmt.Errorf("Failed getting proposal context. Signed proposal is nil.")
+			return errors.New("failed getting proposal context. Signed proposal is nil")
 		}
 
 		msg.Proposal = signedProp
@@ -1384,8 +1370,8 @@ func (handler *Handler) ready(ctxt context.Context, chainID string, txid string,
 	return txctx.responseNotifier, nil
 }
 
-// HandleMessage implementation of MessageHandler interface.  Peer's handling of Chaincode messages.
-func (handler *Handler) HandleMessage(msg *pb.ChaincodeMessage) error {
+// handleMessage is the entrance method for Peer's handling of Chaincode messages.
+func (handler *Handler) handleMessage(msg *pb.ChaincodeMessage) error {
 	chaincodeLogger.Debugf("[%s]Fabric side Handling ChaincodeMessage of type: %s in state %s", shorttxid(msg.Txid), msg.Type, handler.FSM.Current())
 
 	if (msg.Type == pb.ChaincodeMessage_COMPLETED || msg.Type == pb.ChaincodeMessage_ERROR) && handler.FSM.Current() == "ready" {
@@ -1395,7 +1381,7 @@ func (handler *Handler) HandleMessage(msg *pb.ChaincodeMessage) error {
 	}
 	if handler.FSM.Cannot(msg.Type.String()) {
 		// Other errors
-		return fmt.Errorf("[%s]Chaincode handler validator FSM cannot handle message (%s) with payload size (%d) while in state: %s", msg.Txid, msg.Type.String(), len(msg.Payload), handler.FSM.Current())
+		return errors.Errorf("[%s]Chaincode handler validator FSM cannot handle message (%s) with payload size (%d) while in state: %s", msg.Txid, msg.Type.String(), len(msg.Payload), handler.FSM.Current())
 	}
 	eventErr := handler.FSM.Event(msg.Type.String(), msg)
 	filteredErr := filterError(eventErr)

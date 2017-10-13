@@ -19,11 +19,10 @@ package common
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/hyperledger/fabric/bccsp/factory"
-	"github.com/hyperledger/fabric/common/configtx"
-	configtxapi "github.com/hyperledger/fabric/common/configtx/api"
-	"github.com/hyperledger/fabric/common/errors"
+	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/viperutil"
 	"github.com/hyperledger/fabric/core/config"
@@ -35,6 +34,7 @@ import (
 	pb "github.com/hyperledger/fabric/protos/peer"
 	putils "github.com/hyperledger/fabric/protos/utils"
 	"github.com/op/go-logging"
+	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	"golang.org/x/net/context"
 )
@@ -78,7 +78,7 @@ func InitConfig(cmdRoot string) error {
 
 	err := viper.ReadInConfig() // Find and read the config file
 	if err != nil {             // Handle errors reading the config file
-		return fmt.Errorf("Error when reading %s config file: %s", cmdRoot, err)
+		return errors.WithMessage(err, fmt.Sprintf("error when reading %s config file", cmdRoot))
 	}
 
 	return nil
@@ -91,19 +91,19 @@ func InitCrypto(mspMgrConfigDir string, localMSPID string) error {
 	_, err = os.Stat(mspMgrConfigDir)
 	if os.IsNotExist(err) {
 		// No need to try to load MSP from folder which is not available
-		return fmt.Errorf("cannot init crypto, missing %s folder", mspMgrConfigDir)
+		return errors.Errorf("cannot init crypto, missing %s folder", mspMgrConfigDir)
 	}
 
 	// Init the BCCSP
 	var bccspConfig *factory.FactoryOpts
 	err = viperutil.EnhancedExactUnmarshalKey("peer.BCCSP", &bccspConfig)
 	if err != nil {
-		return fmt.Errorf("could not parse YAML config [%s]", err)
+		return errors.WithMessage(err, "could not parse YAML config")
 	}
 
 	err = mspmgmt.LoadLocalMsp(mspMgrConfigDir, bccspConfig, localMSPID)
 	if err != nil {
-		return fmt.Errorf("error when setting up MSP from directory %s: err %s", mspMgrConfigDir, err)
+		return errors.WithMessage(err, fmt.Sprintf("error when setting up MSP from directory %s", mspMgrConfigDir))
 	}
 
 	return nil
@@ -113,8 +113,7 @@ func InitCrypto(mspMgrConfigDir string, localMSPID string) error {
 func GetEndorserClient() (pb.EndorserClient, error) {
 	clientConn, err := peer.NewPeerClientConnection()
 	if err != nil {
-		err = errors.ErrorWithCallstack("PER", "404", "Error trying to connect to local peer").WrapError(err)
-		return nil, err
+		return nil, errors.WithMessage(err, "error trying to connect to local peer")
 	}
 	endorserClient := pb.NewEndorserClient(clientConn)
 	return endorserClient, nil
@@ -124,8 +123,7 @@ func GetEndorserClient() (pb.EndorserClient, error) {
 func GetAdminClient() (pb.AdminClient, error) {
 	clientConn, err := peer.NewPeerClientConnection()
 	if err != nil {
-		err = errors.ErrorWithCallstack("PER", "404", "Error trying to connect to local peer").WrapError(err)
-		return nil, err
+		return nil, errors.WithMessage(err, "error trying to connect to local peer")
 	}
 	adminClient := pb.NewAdminClient(clientConn)
 	return adminClient, nil
@@ -135,7 +133,7 @@ func GetAdminClient() (pb.AdminClient, error) {
 func GetDefaultSigner() (msp.SigningIdentity, error) {
 	signer, err := mspmgmt.GetLocalMSP().GetDefaultSigningIdentity()
 	if err != nil {
-		return nil, fmt.Errorf("Error obtaining the default signing identity, err %s", err)
+		return nil, errors.WithMessage(err, "error obtaining the default signing identity")
 	}
 
 	return signer, err
@@ -155,53 +153,48 @@ func GetOrdererEndpointOfChain(chainID string, signer msp.SigningIdentity, endor
 
 	creator, err := signer.Serialize()
 	if err != nil {
-		return nil, fmt.Errorf("Error serializing identity for %s: %s", signer.GetIdentifier(), err)
+		return nil, errors.WithMessage(err, fmt.Sprintf("error serializing identity for %s", signer.GetIdentifier()))
 	}
 
 	prop, _, err := putils.CreateProposalFromCIS(pcommon.HeaderType_CONFIG, "", invocation, creator)
 	if err != nil {
-		return nil, fmt.Errorf("Error creating GetConfigBlock proposal: %s", err)
+		return nil, errors.WithMessage(err, "error creating GetConfigBlock proposal")
 	}
 
 	signedProp, err := putils.GetSignedProposal(prop, signer)
 	if err != nil {
-		return nil, fmt.Errorf("Error creating signed GetConfigBlock proposal: %s", err)
+		return nil, errors.WithMessage(err, "error creating signed GetConfigBlock proposal")
 	}
 
 	proposalResp, err := endorserClient.ProcessProposal(context.Background(), signedProp)
 	if err != nil {
-		return nil, fmt.Errorf("Error endorsing GetConfigBlock: %s", err)
+		return nil, errors.WithMessage(err, "error endorsing GetConfigBlock")
 	}
 
 	if proposalResp == nil {
-		return nil, fmt.Errorf("Error nil proposal response: %s", err)
+		return nil, errors.WithMessage(err, "error nil proposal response")
 	}
 
 	if proposalResp.Response.Status != 0 && proposalResp.Response.Status != 200 {
-		return nil, fmt.Errorf("Error bad proposal response %d", proposalResp.Response.Status)
+		return nil, errors.Errorf("error bad proposal response %d", proposalResp.Response.Status)
 	}
 
 	// parse config block
 	block, err := putils.GetBlockFromBlockBytes(proposalResp.Response.Payload)
 	if err != nil {
-		return nil, fmt.Errorf("Error unmarshaling config block: %s", err)
+		return nil, errors.WithMessage(err, "error unmarshaling config block")
 	}
 
 	envelopeConfig, err := putils.ExtractEnvelope(block, 0)
 	if err != nil {
-		return nil, fmt.Errorf("Error extracting config block envelope: %s", err)
+		return nil, errors.WithMessage(err, "error extracting config block envelope")
 	}
-	configtxInitializer := configtx.NewInitializer()
-	configtxManager, err := configtx.NewManagerImpl(
-		envelopeConfig,
-		configtxInitializer,
-		[]func(cm configtxapi.Manager){},
-	)
+	bundle, err := channelconfig.NewBundleFromEnvelope(envelopeConfig)
 	if err != nil {
-		return nil, fmt.Errorf("Error loadding config block: %s", err)
+		return nil, errors.WithMessage(err, "error loading config block")
 	}
 
-	return configtxManager.ChannelConfig().OrdererAddresses(), nil
+	return bundle.ChannelConfig().OrdererAddresses(), nil
 }
 
 // SetLogLevelFromViper sets the log level for 'module' logger to the value in
@@ -209,14 +202,18 @@ func GetOrdererEndpointOfChain(chainID string, signer msp.SigningIdentity, endor
 func SetLogLevelFromViper(module string) error {
 	var err error
 	if module == "" {
-		return fmt.Errorf("log level not set, no module name provided")
+		return errors.New("log level not set, no module name provided")
 	}
 	logLevelFromViper := viper.GetString("logging." + module)
 	err = CheckLogLevel(logLevelFromViper)
 	if err != nil {
 		return err
 	}
-	_, err = flogging.SetModuleLevel(module, logLevelFromViper)
+	// replace period in module name with forward slash to allow override
+	// of logging submodules
+	module = strings.Replace(module, ".", "/", -1)
+	// only set logging modules that begin with the supplied module name here
+	_, err = flogging.SetModuleLevel("^"+module, logLevelFromViper)
 	return err
 }
 
@@ -224,7 +221,7 @@ func SetLogLevelFromViper(module string) error {
 func CheckLogLevel(level string) error {
 	_, err := logging.LogLevel(level)
 	if err != nil {
-		err = errors.ErrorWithCallstack("LOG", "400", "Invalid log level provided - %s", level)
+		err = errors.Errorf("invalid log level provided - %s", level)
 	}
 	return err
 }

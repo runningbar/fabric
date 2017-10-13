@@ -7,12 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 package msp
 
 import (
+	"time"
+
 	"github.com/hyperledger/fabric/protos/msp"
 )
-
-// FIXME: we need better comments on the interfaces!!
-// FIXME: we need better comments on the interfaces!!
-// FIXME: we need better comments on the interfaces!!
 
 // IdentityDeserializer is implemented by both MSPManger and MSP
 type IdentityDeserializer interface {
@@ -113,6 +111,12 @@ type OUIdentifier struct {
 // with, and verifying signatures that correspond to these certificates.///
 type Identity interface {
 
+	// ExpiresAt returns the time at which the Identity expires.
+	// If the returned time is the zero value, it implies
+	// the Identity does not expire, or that its expiration
+	// time is unknown
+	ExpiresAt() time.Time
+
 	// GetIdentifier returns the identifier of that identity
 	GetIdentifier() *IdentityIdentifier
 
@@ -186,5 +190,6 @@ type ProviderType int
 // The ProviderType of a member relative to the member API
 const (
 	FABRIC ProviderType = iota // MSP is of FABRIC type
+	IDEMIX                     // MSP is of IDEMIX type
 	OTHER                      // MSP is of OTHER TYPE
 )

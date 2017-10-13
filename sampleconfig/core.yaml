@@ -25,8 +25,7 @@ logging:
     # 2. The environment variable CORE_LOGGING_LEVEL otherwise applies to
     #    all peer commands if defined as a non-empty string.
     #
-    # 3. The value of peer that directly follows in this file. It can also
-    #    be set via the environment variable CORE_LOGGING_PEER.
+    # 3. The value of `level` that directly follows in this file.
     #
     # If no overall default level is provided via any of the above methods,
     # the peer will default to INFO (the value of defaultLevel in
@@ -35,7 +34,7 @@ logging:
     # Default for all modules running within the scope of a peer.
     # Note: this value is only used when --logging-level or CORE_LOGGING_LEVEL
     #       are not set
-    peer:       info
+    level:       info
 
     # The overall default values mentioned above can be overridden for the
     # specific components listed in the override section below.
@@ -48,10 +47,12 @@ logging:
     #       time.
     cauthdsl:   warning
     gossip:     warning
+    grpc:       error
     ledger:     info
     msp:        warning
     policies:   warning
-    grpc:       error
+    peer:
+        gossip: warning
 
     # Message format for the peer logs
     format: '%{color}%{time:2006-01-02 15:04:05.000 MST} [%{module}] %{shortfunc} -> %{level:.4s} %{id:03x}%{color:reset} %{message}'
@@ -74,20 +75,12 @@ peer:
     listenAddress: 0.0.0.0:7051
 
     # The endpoint this peer uses to listen for inbound chaincode connections.
-    #
-    # The chaincode connection does not support TLS-mutual auth. Having a
-    # separate listener for the chaincode helps isolate the chaincode
-    # environment for enhanced security, so it is strongly recommended to
-    # uncomment chaincodeListenAddress and specify a protected endpoint.
-    #
-    # If chaincodeListenAddress is not configured or equals to the listenAddress,
-    # listenAddress will be used for chaincode connections. This is not
-    # recommended for production.
-    #
-    # chaincodeListenAddress: 127.0.0.1:7052
+    # If this is commented-out, the listen address is selected to be
+    # the peer's address (see below) with port 7052
+    # chaincodeListenAddress: 0.0.0.0:7052
 
     # When used as peer config, this represents the endpoint to other peers
-    # in the same organization for peers in other organization, see
+    # in the same organization. For peers in other organization, see
     # gossip.externalEndpoint for more info.
     # When used as CLI config, this means the peer's endpoint to interact with
     address: 0.0.0.0:7051
@@ -120,12 +113,12 @@ peer:
         # connection with ordering service and use delivery protocol
         # to pull ledger blocks from ordering service. It is recommended to
         # use leader election for large networks of peers.
-        useLeaderElection: false
+        useLeaderElection: true
         # Statically defines peer to be an organization "leader",
         # where this means that current peer will maintain connection
         # with ordering service and disseminate block across peers in
         # its own organization
-        orgLeader: true
+        orgLeader: false
 
         # Overrides the endpoint that the peer publishes to peers
         # in its organization. For peers in foreign organizations
@@ -188,6 +181,28 @@ peer:
             leaderAliveThreshold: 10s
             # Time between peer sends propose message and declares itself as a leader (sends declaration message) (unit: second)
             leaderElectionDuration: 5s
+
+        pvtData:
+            # pullRetryThreshold determines the maximum duration of time private data corresponding for a given block
+            # would be attempted to be pulled from peers until the block would be committed without the private data
+            pullRetryThreshold: 60s
+            # minInternalPeers defines the minimum number of peers from the peer's organization
+            # that an endorsement containing private data would target for dissemination.
+            # The endorsement would fail if an insufficient number of acknowledgements from
+            # peers of the peer's organization wasn't obtained.
+            minInternalPeers: 1
+            # maxInternalPeers defines the maximum number of peers from the peer's organization
+            # that an endorsement containing private data would target for dissemination
+            maxInternalPeers: 1
+
+            # minInternalPeers defines the minimum number of peers foreign to the peer's organization
+            # that an endorsement containing private data would target for dissemination
+            # The endorsement would fail if an insufficient number of acknowledgements from
+            # peers foreign to the peer's organization wasn't obtained.
+            minExternalPeers: 1
+            # maxInternalPeers defines the maximum number of peers foreign to the peer's organization
+            # that an endorsement containing private data would target for dissemination
+            maxExternalPeers: 1
 
     # EventHub related configuration
     events:
@@ -256,6 +271,43 @@ peer:
     profile:
         enabled:     false
         listenAddress: 0.0.0.0:6060
+
+    # Handlers defines custom handlers that can filter and mutate
+    # objects passing within the peer, such as:
+    #   Auth filter - reject or forward proposals from clients
+    #   Decorators  - append or mutate the chaincode input passed to the chaincode
+    # Valid handler definition contains:
+    #   - A name which is a factory method name defined in
+    #     core/handlers/library/library.go for statically compiled handlers
+    #   - library path to shared object binary for pluggable filters
+    # Auth filters and decorators are chained and executed in the order that
+    # they are defined. For example:
+    # authFilters:
+    #   -
+    #     name: FilterOne
+    #     library: /opt/lib/filter.so
+    #   -
+    #     name: FilterTwo
+    # decorators:
+    #   -
+    #     name: DecoratorOne
+    #   -
+    #     name: DecoratorTwo
+    #     library: /opt/lib/decorator.so
+    handlers:
+        authFilters:
+          -
+            name: DefaultAuth
+        decorators:
+          -
+            name: DefaultDecorator
+
+    # Number of goroutines that will execute transaction validation in parallel.
+    # By default, the peer chooses the number of CPUs on the machine. Set this
+    # variable to override that choice.
+    # NOTE: overriding this value might negatively influence the performance of
+    # the peer so please change this value only if you know what you're doing
+    validatorPoolSize:
 
 ###############################################################################
 #
@@ -345,6 +397,11 @@ chaincode:
         Dockerfile:  |
             from $(DOCKER_NS)/fabric-javaenv:$(ARCH)-$(PROJECT_VERSION)
 
+    node:
+        # need node.js engine at runtime, currently available in baseimage
+        # but not in baseos
+        runtime: $(BASE_DOCKER_NS)/fabric-baseimage:$(ARCH)-$(BASE_VERSION)
+
     # Timeout duration for starting up a container and waiting for Register
     # to come through. 1sec should be plenty for chaincode unit tests
     startuptimeout: 300s
@@ -380,6 +437,7 @@ chaincode:
         escc: enable
         vscc: enable
         qscc: enable
+        rscc: disable
 
     # Logging section for the chaincode container
     logging:
@@ -426,6 +484,8 @@ ledger:
        requestTimeout: 35s
        # Limit on the number of records to return per query
        queryLimit: 10000
+       # Limit on the number of records per CouchDB bulk update batch
+       maxBatchUpdateSize: 1000
 
 
   history:

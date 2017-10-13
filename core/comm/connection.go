@@ -9,8 +9,10 @@ package comm
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"sync"
 	"time"
@@ -38,7 +40,7 @@ type CASupport struct {
 	ServerRootCAs         [][]byte
 }
 
-// GetCASupport returns the signleton CASupport instance
+// GetCASupport returns the singleton CASupport instance
 func GetCASupport() *CASupport {
 
 	once.Do(func() {
@@ -117,19 +119,12 @@ func (cas *CASupport) GetPeerCredentials(tlsCert tls.Certificate) credentials.Tr
 		Certificates: []tls.Certificate{tlsCert},
 	}
 	var certPool = x509.NewCertPool()
-	// loop through the orderer CAs
+	// loop through the server root CAs
 	roots, _ := cas.GetServerRootCAs()
 	for _, root := range roots {
-		block, _ := pem.Decode(root)
-		if block != nil {
-			cert, err := x509.ParseCertificate(block.Bytes)
-			if err == nil {
-				certPool.AddCert(cert)
-			} else {
-				commLogger.Warningf("Failed to add root cert to credentials (%s)", err)
-			}
-		} else {
-			commLogger.Warning("Failed to add root cert to credentials")
+		err := AddPemToCertPool(root, certPool)
+		if err != nil {
+			commLogger.Warningf("Failed adding certificates to peer's client TLS trust pool: %s", err)
 		}
 	}
 	tlsConfig.RootCAs = certPool
@@ -174,9 +169,32 @@ func GetPeerTestingAddress(port string) string {
 	return getEnv("UNIT_TEST_PEER_IP", "localhost") + ":" + port
 }
 
-// NewClientConnectionWithAddress Returns a new grpc.ClientConn to the given address.
+// NewClientConnectionWithAddress Returns a new grpc.ClientConn to the given address
 func NewClientConnectionWithAddress(peerAddress string, block bool, tslEnabled bool, creds credentials.TransportCredentials) (*grpc.ClientConn, error) {
+	return newClientConnectionWithAddressWithKa(peerAddress, block, tslEnabled, creds, nil)
+}
+
+// NewChaincodeClientConnectionWithAddress Returns a new chaincode type grpc.ClientConn to the given address
+func NewChaincodeClientConnectionWithAddress(peerAddress string, block bool, tslEnabled bool, creds credentials.TransportCredentials) (*grpc.ClientConn, error) {
+	ka := chaincodeKeepaliveOptions
+	//client side's keepalive parameter better be greater than EnforcementPolicies MinTime
+	//to prevent server killing the connection due to timing issues. Just increase by a min
+	ka.ClientKeepaliveTime += 60
+
+	return newClientConnectionWithAddressWithKa(peerAddress, block, tslEnabled, creds, &ka)
+}
+
+// newClientConnectionWithAddressWithKa Returns a new grpc.ClientConn to the given address using specied keepalive options
+func newClientConnectionWithAddressWithKa(peerAddress string, block bool, tslEnabled bool, creds credentials.TransportCredentials, ka *KeepaliveOptions) (*grpc.ClientConn, error) {
 	var opts []grpc.DialOption
+
+	//preserve old behavior for non chaincode. We probably
+	//want to change this in future to have peer client
+	//send keepalives too
+	if ka != nil {
+		opts = clientKeepaliveOptionsWithKa(ka)
+	}
+
 	if tslEnabled {
 		opts = append(opts, grpc.WithTransportCredentials(creds))
 	} else {
@@ -212,4 +230,36 @@ func InitTLSForPeer() credentials.TransportCredentials {
 		creds = credentials.NewClientTLSFromCert(nil, sn)
 	}
 	return creds
+}
+
+func InitTLSForShim(key, certStr string) credentials.TransportCredentials {
+	var sn string
+	if viper.GetString("peer.tls.serverhostoverride") != "" {
+		sn = viper.GetString("peer.tls.serverhostoverride")
+	}
+	priv, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		commLogger.Panicf("failed decoding private key from base64, string: %s, error: %v", key, err)
+	}
+	pub, err := base64.StdEncoding.DecodeString(certStr)
+	if err != nil {
+		commLogger.Panicf("failed decoding public key from base64, string: %s, error: %v", certStr, err)
+	}
+	cert, err := tls.X509KeyPair(pub, priv)
+	if err != nil {
+		commLogger.Panicf("failed loading certificate: %v", err)
+	}
+	b, err := ioutil.ReadFile(config.GetPath("peer.tls.rootcert.file"))
+	if err != nil {
+		commLogger.Panicf("failed loading root ca cert: %v", err)
+	}
+	cp := x509.NewCertPool()
+	if !cp.AppendCertsFromPEM(b) {
+		commLogger.Panicf("failed to append certificates")
+	}
+	return credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      cp,
+		ServerName:   sn,
+	})
 }

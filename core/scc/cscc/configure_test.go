@@ -1,4 +1,5 @@
 /*
+
 Copyright IBM Corp. 2016 All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +19,6 @@ package cscc
 import (
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +28,10 @@ import (
 	"github.com/hyperledger/fabric/common/localmsp"
 	"github.com/hyperledger/fabric/common/mocks/scc"
 	"github.com/hyperledger/fabric/common/policies"
+	"github.com/hyperledger/fabric/core/aclmgmt"
+	aclmocks "github.com/hyperledger/fabric/core/aclmgmt/mocks"
 	"github.com/hyperledger/fabric/core/chaincode"
+	"github.com/hyperledger/fabric/core/chaincode/accesscontrol"
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 	"github.com/hyperledger/fabric/core/common/sysccprovider"
 	"github.com/hyperledger/fabric/core/deliverservice"
@@ -46,6 +49,7 @@ import (
 	cb "github.com/hyperledger/fabric/protos/common"
 	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
@@ -55,7 +59,7 @@ type mockDeliveryClient struct {
 
 // StartDeliverForChannel dynamically starts delivery of new blocks from ordering service
 // to channel peers.
-func (ds *mockDeliveryClient) StartDeliverForChannel(chainID string, ledgerInfo blocksprovider.LedgerInfo) error {
+func (ds *mockDeliveryClient) StartDeliverForChannel(chainID string, ledgerInfo blocksprovider.LedgerInfo, f func()) error {
 	return nil
 }
 
@@ -77,8 +81,15 @@ func (*mockDeliveryClientFactory) Service(g service.GossipService, endpoints []s
 	return &mockDeliveryClient{}, nil
 }
 
+var mockAclProvider *aclmocks.MockACLProvider
+
 func TestMain(m *testing.M) {
 	msptesttools.LoadMSPSetupForTesting()
+
+	mockAclProvider = &aclmocks.MockACLProvider{}
+	mockAclProvider.Reset()
+
+	aclmgmt.RegisterACLProvider(mockAclProvider)
 
 	os.Exit(m.Run())
 }
@@ -109,15 +120,18 @@ func TestConfigerInvokeInvalidParameters(t *testing.T) {
 	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected to fail no signed proposal provided")
 	assert.Contains(t, res.Message, "failed authorization check")
 
-	args = [][]byte{[]byte("GetConfigBlock"), []byte("testChainID")}
-	res = stub.MockInvokeWithSignedProposal("4", args, nil)
-	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected to fail no signed proposal provided")
-	assert.Contains(t, res.Message, "failed authorization check")
-
 	args = [][]byte{[]byte("fooFunction"), []byte("testChainID")}
 	res = stub.MockInvoke("5", args)
 	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected wrong function name provided")
 	assert.Equal(t, res.Message, "Requested function fooFunction not found.")
+
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.CSCC_GetConfigBlock, "testChainID", (*pb.SignedProposal)(nil)).Return(errors.New("Nil SignedProposal"))
+	args = [][]byte{[]byte("GetConfigBlock"), []byte("testChainID")}
+	res = stub.MockInvokeWithSignedProposal("4", args, nil)
+	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected to fail no signed proposal provided")
+	assert.Contains(t, res.Message, "Nil SignedProposal")
+	mockAclProvider.AssertExpectations(t)
 }
 
 func TestConfigerInvokeJoinChainMissingParams(t *testing.T) {
@@ -141,6 +155,7 @@ func TestConfigerInvokeJoinChainMissingParams(t *testing.T) {
 }
 
 func TestConfigerInvokeJoinChainWrongParams(t *testing.T) {
+
 	viper.Set("peer.fileSystemPath", "/tmp/hyperledgertest/")
 	os.Mkdir("/tmp/hyperledgertest", 0755)
 	defer os.RemoveAll("/tmp/hyperledgertest/")
@@ -180,7 +195,8 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 		return &pb.PeerEndpoint{Id: &pb.PeerID{Name: "cscctestpeer"}, Address: peerEndpoint}, nil
 	}
 	ccStartupTimeout := time.Duration(30000) * time.Millisecond
-	chaincode.NewChaincodeSupport(getPeerEndpoint, false, ccStartupTimeout)
+	ca, _ := accesscontrol.NewCA()
+	chaincode.NewChaincodeSupport(getPeerEndpoint, false, ccStartupTimeout, ca)
 
 	// Init the policy checker
 	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
@@ -242,7 +258,7 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 	if res.Status == shim.OK {
 		t.Fatalf("cscc invoke JoinChain must fail : %v", res.Message)
 	}
-	assert.True(t, strings.HasPrefix(res.Message, "\"JoinChain\" request failed authorization check for channel"))
+	assert.Contains(t, res.Message, "\"JoinChain\" request failed authorization check for channel")
 	sProp.Signature = sProp.ProposalBytes
 
 	// Query the configuration block
@@ -251,8 +267,21 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cscc invoke JoinChain failed with: %v", err)
 	}
+
+	// Test an ACL failure on GetConfigBlock
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.CSCC_GetConfigBlock, "mytestchainid", sProp).Return(errors.New("Failed authorization"))
 	args = [][]byte{[]byte("GetConfigBlock"), []byte(chainID)}
-	policyManagerGetter.Managers["mytestchainid"].(*policymocks.MockChannelPolicyManager).MockPolicy.(*policymocks.MockPolicy).Deserializer.(*policymocks.MockIdentityDeserializer).Msg = sProp.ProposalBytes
+	res = stub.MockInvokeWithSignedProposal("2", args, sProp)
+	if res.Status == shim.OK {
+		t.Fatalf("cscc invoke GetConfigBlock shoulda have failed: %v", res.Message)
+	}
+	assert.Contains(t, res.Message, "Failed authorization")
+	mockAclProvider.AssertExpectations(t)
+
+	// Test with ACL okay
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", aclmgmt.CSCC_GetConfigBlock, "mytestchainid", sProp).Return(nil)
 	if res := stub.MockInvokeWithSignedProposal("2", args, sProp); res.Status != shim.OK {
 		t.Fatalf("cscc invoke GetConfigBlock failed with: %v", res.Message)
 	}
@@ -277,6 +306,7 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 }
 
 func TestPeerConfiger_SubmittingOrdererGenesis(t *testing.T) {
+
 	viper.Set("peer.fileSystemPath", "/tmp/hyperledgertest/")
 	os.Mkdir("/tmp/hyperledgertest", 0755)
 	defer os.RemoveAll("/tmp/hyperledgertest/")

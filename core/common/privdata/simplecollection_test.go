@@ -82,6 +82,10 @@ func (md *mockDeserializer) DeserializeIdentity(serializedIdentity []byte) (msp.
 	return &mockIdentity{idBytes: serializedIdentity}, nil
 }
 
+func (md *mockDeserializer) IsWellFormed(_ *mb.SerializedIdentity) error {
+	return nil
+}
+
 func TestSetupBadConfig(t *testing.T) {
 	// set up simple collection with invalid data
 	var sc SimpleCollection
@@ -117,8 +121,7 @@ func TestSetupGoodConfigCollection(t *testing.T) {
 	assert.True(t, members[1] == "signer1")
 
 	// check required peer count
-	assert.True(t, sc.RequiredInternalPeerCount() == 1)
-	assert.True(t, sc.RequiredExternalPeerCount() == 1)
+	assert.True(t, sc.RequiredPeerCount() == 1)
 }
 
 func TestSimpleCollectionFilter(t *testing.T) {

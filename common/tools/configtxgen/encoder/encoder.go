@@ -10,19 +10,25 @@ import (
 	"github.com/hyperledger/fabric/common/cauthdsl"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/flogging"
+	"github.com/hyperledger/fabric/common/genesis"
 	"github.com/hyperledger/fabric/common/policies"
 	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
+	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/msp"
 	cb "github.com/hyperledger/fabric/protos/common"
 	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protos/utils"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
 )
 
 const (
 	pkgLogID                = "common/tools/configtxgen/encoder"
 	ordererAdminsPolicyName = "/Channel/Orderer/Admins"
+
+	msgVersion = int32(0)
+	epoch      = 0
 )
 
 var logger = flogging.MustGetLogger(pkgLogID)
@@ -174,7 +180,7 @@ func NewOrdererGroup(conf *genesisconfig.Orderer) (*cb.ConfigGroup, error) {
 func NewOrdererOrgGroup(conf *genesisconfig.Organization) (*cb.ConfigGroup, error) {
 	mspConfig, err := msp.GetVerifyingMspConfig(conf.MSPDir, conf.ID)
 	if err != nil {
-		return nil, errors.Wrapf(err, "1 - Error loading MSP configuration for org %s: %s", conf.Name)
+		return nil, errors.Wrapf(err, "1 - Error loading MSP configuration for org: %s", conf.Name)
 	}
 
 	ordererOrgGroup := cb.NewConfigGroup()
@@ -271,4 +277,152 @@ func NewConsortiumGroup(conf *genesisconfig.Consortium) (*cb.ConfigGroup, error)
 
 	consortiumGroup.ModPolicy = ordererAdminsPolicyName
 	return consortiumGroup, nil
+}
+
+// NewChannelCreateConfigUpdate generates a ConfigUpdate which can be sent to the orderer to create a new channel.  Optionally, the channel group of the
+// ordering system channel may be passed in, and the resulting ConfigUpdate will extract the appropriate versions from this file.
+func NewChannelCreateConfigUpdate(channelID, consortiumName string, orgs []string, orderingSystemChannelGroup *cb.ConfigGroup) (*cb.ConfigUpdate, error) {
+	var applicationGroup *cb.ConfigGroup
+	channelGroupVersion := uint64(0)
+
+	if orderingSystemChannelGroup != nil {
+		// In the case that a ordering system channel definition was provided, pull the appropriate versions
+		if orderingSystemChannelGroup.Groups == nil {
+			return nil, errors.New("missing all channel groups")
+		}
+
+		consortiums, ok := orderingSystemChannelGroup.Groups[channelconfig.ConsortiumsGroupKey]
+		if !ok {
+			return nil, errors.New("bad consortiums group")
+		}
+
+		consortium, ok := consortiums.Groups[consortiumName]
+		if !ok || (len(orgs) > 0 && consortium.Groups == nil) {
+			return nil, errors.Errorf("bad consortium: %s", consortiumName)
+		}
+
+		applicationGroup = cb.NewConfigGroup()
+		for _, org := range orgs {
+			orgGroup, ok := consortium.Groups[org]
+			if !ok {
+				return nil, errors.Errorf("missing organization: %s", org)
+			}
+			applicationGroup.Groups[org] = &cb.ConfigGroup{Version: orgGroup.Version}
+		}
+
+		channelGroupVersion = orderingSystemChannelGroup.Version
+	} else {
+		// Otherwise assume the orgs have not been modified
+		applicationGroup = cb.NewConfigGroup()
+		for _, org := range orgs {
+			applicationGroup.Groups[org] = &cb.ConfigGroup{}
+		}
+	}
+
+	rSet := cb.NewConfigGroup()
+	rSet.Version = channelGroupVersion
+
+	// add the consortium name to the rSet
+
+	addValue(rSet, channelconfig.ConsortiumValue(consortiumName), "") // TODO, this emulates the old behavior, but is it desirable?
+
+	// create the new channel's application group
+
+	rSet.Groups[channelconfig.ApplicationGroupKey] = applicationGroup
+
+	wSet := proto.Clone(rSet).(*cb.ConfigGroup)
+
+	applicationGroup = wSet.Groups[channelconfig.ApplicationGroupKey]
+	applicationGroup.Version = 1
+	applicationGroup.Policies = make(map[string]*cb.ConfigPolicy)
+	addImplicitMetaPolicyDefaults(applicationGroup)
+	applicationGroup.ModPolicy = channelconfig.AdminsPolicyKey
+
+	return &cb.ConfigUpdate{
+		ChannelId: channelID,
+		ReadSet:   rSet,
+		WriteSet:  wSet,
+	}, nil
+}
+
+// MakeChannelCreationTransaction is a handy utility function for creating transactions for channel creation
+func MakeChannelCreationTransaction(channelID string, consortium string, signer msp.SigningIdentity, orderingSystemChannelConfigGroup *cb.ConfigGroup, orgs ...string) (*cb.Envelope, error) {
+	newChannelConfigUpdate, err := NewChannelCreateConfigUpdate(channelID, consortium, orgs, orderingSystemChannelConfigGroup)
+	if err != nil {
+		return nil, errors.Wrap(err, "config update generation failure")
+	}
+
+	newConfigUpdateEnv := &cb.ConfigUpdateEnvelope{
+		ConfigUpdate: utils.MarshalOrPanic(newChannelConfigUpdate),
+	}
+
+	payloadSignatureHeader := &cb.SignatureHeader{}
+	if signer != nil {
+		sSigner, err := signer.Serialize()
+		if err != nil {
+			return nil, errors.Wrap(err, "serialization of identity failed")
+		}
+
+		newConfigUpdateEnv.Signatures = []*cb.ConfigSignature{&cb.ConfigSignature{
+			SignatureHeader: utils.MarshalOrPanic(utils.MakeSignatureHeader(sSigner, utils.CreateNonceOrPanic())),
+		}}
+
+		newConfigUpdateEnv.Signatures[0].Signature, err = signer.Sign(util.ConcatenateBytes(newConfigUpdateEnv.Signatures[0].SignatureHeader, newConfigUpdateEnv.ConfigUpdate))
+		if err != nil {
+			return nil, errors.Wrap(err, "signature failure over config update")
+		}
+
+		payloadSignatureHeader = utils.MakeSignatureHeader(sSigner, utils.CreateNonceOrPanic())
+	}
+
+	payloadChannelHeader := utils.MakeChannelHeader(cb.HeaderType_CONFIG_UPDATE, msgVersion, channelID, epoch)
+	utils.SetTxID(payloadChannelHeader, payloadSignatureHeader)
+	payloadHeader := utils.MakePayloadHeader(payloadChannelHeader, payloadSignatureHeader)
+	payload := &cb.Payload{Header: payloadHeader, Data: utils.MarshalOrPanic(newConfigUpdateEnv)}
+	paylBytes := utils.MarshalOrPanic(payload)
+
+	var sig []byte
+	if signer != nil {
+		// sign the payload
+		sig, err = signer.Sign(paylBytes)
+		if err != nil {
+			return nil, errors.Wrap(err, "signature failure over config update envelope")
+		}
+	}
+
+	return &cb.Envelope{Payload: paylBytes, Signature: sig}, nil
+}
+
+// Bootstrapper is a wrapper around NewChannelConfigGroup which can produce genesis blocks
+type Bootstrapper struct {
+	channelGroup *cb.ConfigGroup
+}
+
+// New creates a new Bootstrapper for generating genesis blocks
+func New(config *genesisconfig.Profile) *Bootstrapper {
+	channelGroup, err := NewChannelGroup(config)
+	if err != nil {
+		logger.Panicf("Error creating channel group: %s", err)
+	}
+	return &Bootstrapper{
+		channelGroup: channelGroup,
+	}
+}
+
+// GenesisBlock produces a genesis block for the default test chain id
+func (bs *Bootstrapper) GenesisBlock() *cb.Block {
+	block, err := genesis.NewFactoryImpl(bs.channelGroup).Block(genesisconfig.TestChainID)
+	if err != nil {
+		logger.Panicf("Error creating genesis block from channel group: %s", err)
+	}
+	return block
+}
+
+// GenesisBlockForChannel produces a genesis block for a given channel ID
+func (bs *Bootstrapper) GenesisBlockForChannel(channelID string) *cb.Block {
+	block, err := genesis.NewFactoryImpl(bs.channelGroup).Block(channelID)
+	if err != nil {
+		logger.Panicf("Error creating genesis block from channel group: %s", err)
+	}
+	return block
 }

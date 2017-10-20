@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	pb "github.com/golang/protobuf/proto"
 	util2 "github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/common/privdata"
 	"github.com/hyperledger/fabric/core/ledger"
@@ -23,6 +24,7 @@ import (
 	"github.com/hyperledger/fabric/protos/common"
 	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/hyperledger/fabric/protos/ledger/rwset"
+	"github.com/hyperledger/fabric/protos/msp"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -78,8 +80,12 @@ func (store *mockTransientStore) Persist(txid string, blockHeight uint64, res *r
 		store.t.Fatal("Shouldn't have persisted", res)
 	}
 	delete(store.persists, key)
-	store.Called(txid, res)
+	store.Called(txid, blockHeight, res)
 	return nil
+}
+
+func (store *mockTransientStore) PurgeByHeight(maxBlockNumToRetain uint64) error {
+	return store.Called(maxBlockNumToRetain).Error(0)
 }
 
 func (store *mockTransientStore) GetTxPvtRWSetByTxid(txid string, filter ledger.PvtNsCollFilter) (transientstore.RWSetScanner, error) {
@@ -161,6 +167,9 @@ func (mock *committerMock) Commit(block *common.Block) error {
 
 func (mock *committerMock) LedgerHeight() (uint64, error) {
 	args := mock.Called()
+	if args.Get(0) == nil {
+		return uint64(0), args.Error(1)
+	}
 	return args.Get(0).(uint64), args.Error(1)
 }
 
@@ -206,8 +215,21 @@ type fetchCall struct {
 	*mock.Call
 }
 
-func (fc *fetchCall) expectingReq(req *proto.RemotePvtDataRequest) *fetchCall {
-	fc.fetcher.expectedReq = req
+func (fc *fetchCall) expectingEndorsers(orgs ...string) *fetchCall {
+	if fc.fetcher.expectedEndorsers == nil {
+		fc.fetcher.expectedEndorsers = make(map[string]struct{})
+	}
+	for _, org := range orgs {
+		sId := &msp.SerializedIdentity{Mspid: org, IdBytes: []byte(fmt.Sprintf("p0%s", org))}
+		b, _ := pb.Marshal(sId)
+		fc.fetcher.expectedEndorsers[string(b)] = struct{}{}
+	}
+
+	return fc
+}
+
+func (fc *fetchCall) expectingDigests(dig []*proto.PvtDataDigest) *fetchCall {
+	fc.fetcher.expectedDigests = dig
 	return fc
 }
 
@@ -219,7 +241,8 @@ func (fc *fetchCall) Return(returnArguments ...interface{}) *mock.Call {
 type fetcherMock struct {
 	t *testing.T
 	mock.Mock
-	expectedReq *proto.RemotePvtDataRequest
+	expectedDigests   []*proto.PvtDataDigest
+	expectedEndorsers map[string]struct{}
 }
 
 func (f *fetcherMock) On(methodName string, arguments ...interface{}) *fetchCall {
@@ -229,9 +252,20 @@ func (f *fetcherMock) On(methodName string, arguments ...interface{}) *fetchCall
 	}
 }
 
-func (f *fetcherMock) fetch(req *proto.RemotePvtDataRequest) ([]*proto.PvtDataElement, error) {
-	assert.True(f.t, digests(req.Digests).Equal(digests(f.expectedReq.Digests)))
-	args := f.Called(req)
+func (f *fetcherMock) fetch(dig2src dig2sources) ([]*proto.PvtDataElement, error) {
+	for _, endorsements := range dig2src {
+		for _, endorsement := range endorsements {
+			_, exists := f.expectedEndorsers[string(endorsement.Endorser)]
+			if !exists {
+				f.t.Fatalf("Encountered a non-expected endorser: %s", string(endorsement.Endorser))
+			}
+			// Else, it exists, so delete it so we will end up with an empty expected map at the end of the call
+			delete(f.expectedEndorsers, string(endorsement.Endorser))
+		}
+	}
+	assert.True(f.t, digests(dig2src.keys()).Equal(digests(f.expectedDigests)))
+	assert.Empty(f.t, f.expectedEndorsers)
+	args := f.Called(dig2src)
 	if args.Get(1) == nil {
 		return args.Get(0).([]*proto.PvtDataElement), nil
 	}
@@ -287,12 +321,12 @@ type collectionAccessPolicy struct {
 	n  uint64
 }
 
-func (cap *collectionAccessPolicy) RequiredInternalPeerCount() int {
-	return viper.GetInt("peer.gossip.pvtData.minInternalPeers")
+func (cap *collectionAccessPolicy) MemberOrgs() []string {
+	return []string{"org0", "org1"}
 }
 
-func (cap *collectionAccessPolicy) RequiredExternalPeerCount() int {
-	return viper.GetInt("peer.gossip.pvtData.minExternalPeers")
+func (cap *collectionAccessPolicy) RequiredPeerCount() int {
+	return viper.GetInt("peer.gossip.pvtData.minPeers")
 }
 
 func (cap *collectionAccessPolicy) AccessFilter() privdata.Filter {
@@ -693,7 +727,7 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 	bf := &blockFactory{
 		channelID: "test",
 	}
-	block := bf.AddTxn("tx1", "ns1", hash, "c1", "c2").AddTxn("tx2", "ns2", hash, "c1").create()
+	block := bf.AddTxnWithEndorsement("tx1", "ns1", hash, "org1", "c1", "c2").AddTxnWithEndorsement("tx2", "ns2", hash, "org2", "c1").create()
 
 	// Scenario I: Block we got has sufficient private data alongside it.
 	// If the coordinator tries fetching from the transientstore, or peers it would result in panic,
@@ -729,17 +763,17 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 
 	// Scenario III: Block doesn't have sufficient private data alongside it,
 	// it is missing ns1: c2, and the data exists in the transient store,
-	// but it is also missing ns2: c1, and that data doesn't exist in the transient store - but in a peer
-	fetcher.On("fetch", mock.Anything).expectingReq(&proto.RemotePvtDataRequest{
-		Digests: []*proto.PvtDataDigest{
-			{
-				TxId: "tx1", Namespace: "ns1", Collection: "c2", BlockSeq: 1,
-			},
-			{
-				TxId: "tx2", Namespace: "ns2", Collection: "c1", BlockSeq: 1, SeqInBlock: 1,
-			},
+	// but it is also missing ns2: c1, and that data doesn't exist in the transient store - but in a peer.
+	// Additionally, the coordinator should pass an endorser identity of org1, but not of org2, since
+	// the MemberOrgs() call doesn't return org2 but only org0 and org1.
+	fetcher.On("fetch", mock.Anything).expectingDigests([]*proto.PvtDataDigest{
+		{
+			TxId: "tx1", Namespace: "ns1", Collection: "c2", BlockSeq: 1,
 		},
-	}).Return([]*proto.PvtDataElement{
+		{
+			TxId: "tx2", Namespace: "ns2", Collection: "c1", BlockSeq: 1, SeqInBlock: 1,
+		},
+	}).expectingEndorsers("org1").Return([]*proto.PvtDataElement{
 		{
 			Digest: &proto.PvtDataDigest{
 				BlockSeq:   1,
@@ -760,7 +794,7 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 			Payload: [][]byte{[]byte("rws-pre-image")},
 		},
 	}, nil)
-	store.On("Persist", mock.Anything, mock.Anything).
+	store.On("Persist", mock.Anything, uint64(1), mock.Anything).
 		expectRWSet("ns1", "c2", []byte("rws-pre-image")).
 		expectRWSet("ns2", "c1", []byte("rws-pre-image")).Return(nil)
 	pvtData = pdFactory.addRWSet().addNSRWSet("ns1", "c1").create()
@@ -782,11 +816,9 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 	// In this case, we should try to fetch data from peers.
 	block = bf.AddTxn("tx3", "ns3", hash, "c3").create()
 	fetcher = &fetcherMock{t: t}
-	fetcher.On("fetch", mock.Anything).expectingReq(&proto.RemotePvtDataRequest{
-		Digests: []*proto.PvtDataDigest{
-			{
-				TxId: "tx3", Namespace: "ns3", Collection: "c3", BlockSeq: 1,
-			},
+	fetcher.On("fetch", mock.Anything).expectingDigests([]*proto.PvtDataDigest{
+		{
+			TxId: "tx3", Namespace: "ns3", Collection: "c3", BlockSeq: 1,
 		},
 	}).Return([]*proto.PvtDataElement{
 		{
@@ -806,13 +838,11 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 		}
 	}).Return(nil)
 	store.On("GetTxPvtRWSetByTxid", "tx3", mock.Anything).Return(&mockRWSetScanner{err: errors.New("uh oh")}, nil)
-	store.On("Persist", mock.Anything, mock.Anything).expectRWSet("ns3", "c3", []byte("rws-pre-image"))
+	store.On("Persist", mock.Anything, uint64(1), mock.Anything).expectRWSet("ns3", "c3", []byte("rws-pre-image"))
 	committer = &committerMock{}
 	committer.On("CommitWithPvtData", mock.Anything).Run(func(args mock.Arguments) {
 		var privateDataPassed2Ledger privateData = args.Get(0).(*ledger.BlockAndPvtData).BlockPvtData
 		assert.True(t, privateDataPassed2Ledger.Equal(expectedCommittedPrivateData2))
-		fmt.Println(privateDataPassed2Ledger)
-		fmt.Println(expectedCommittedPrivateData2)
 		commitHappened = true
 	}).Return(nil)
 	coordinator = NewCoordinator(Support{
@@ -914,11 +944,9 @@ func TestProceedWithoutPrivateData(t *testing.T) {
 
 	fetcher := &fetcherMock{t: t}
 	// Have the peer return in response to the pull, a private data with a non matching hash
-	fetcher.On("fetch", mock.Anything).expectingReq(&proto.RemotePvtDataRequest{
-		Digests: []*proto.PvtDataDigest{
-			{
-				TxId: "tx1", Namespace: "ns3", Collection: "c2", BlockSeq: 1,
-			},
+	fetcher.On("fetch", mock.Anything).expectingDigests([]*proto.PvtDataDigest{
+		{
+			TxId: "tx1", Namespace: "ns3", Collection: "c2", BlockSeq: 1,
 		},
 	}).Return([]*proto.PvtDataElement{
 		{
@@ -1010,4 +1038,78 @@ func TestCoordinatorGetBlocks(t *testing.T) {
 	assert.Nil(t, block2)
 	assert.Empty(t, returnedPrivateData)
 	assert.Error(t, err)
+}
+
+func TestPurgeByHeight(t *testing.T) {
+	// Scenario: commit 3000 blocks and ensure that PurgeByHeight is called
+	// at commit of blocks 2000 and 3000 with values of max block to retain of 1000 and 2000
+	peerSelfSignedData := common.SignedData{}
+	cs := createcollectionStore(peerSelfSignedData).thatAcceptsAll()
+
+	var purgeHappened bool
+	assertPurgeHappened := func() {
+		assert.True(t, purgeHappened)
+		purgeHappened = false
+	}
+	committer := &committerMock{}
+	committer.On("CommitWithPvtData", mock.Anything).Return(nil)
+	store := &mockTransientStore{t: t}
+	store.On("PurgeByHeight", uint64(1000)).Return(nil).Once().Run(func(_ mock.Arguments) {
+		purgeHappened = true
+	})
+	store.On("PurgeByHeight", uint64(2000)).Return(nil).Once().Run(func(_ mock.Arguments) {
+		purgeHappened = true
+	})
+	store.On("PurgeByTxids", mock.Anything).Return(nil)
+	fetcher := &fetcherMock{t: t}
+
+	bf := &blockFactory{
+		channelID: "test",
+	}
+	coordinator := NewCoordinator(Support{
+		CollectionStore: cs,
+		Committer:       committer,
+		Fetcher:         fetcher,
+		TransientStore:  store,
+		Validator:       &validatorMock{},
+	}, peerSelfSignedData)
+
+	for i := 0; i <= 3000; i++ {
+		block := bf.create()
+		block.Header.Number = uint64(i)
+		err := coordinator.StoreBlock(block, nil)
+		assert.NoError(t, err)
+		if i != 2000 && i != 3000 {
+			assert.False(t, purgeHappened)
+		} else {
+			assertPurgeHappened()
+		}
+	}
+}
+
+func TestCoordinatorStorePvtData(t *testing.T) {
+	cs := createcollectionStore(common.SignedData{}).thatAcceptsAll()
+	committer := &committerMock{}
+	committer.On("LedgerHeight").Return(uint64(5), nil).Once()
+	store := &mockTransientStore{t: t}
+	store.On("Persist", mock.Anything, uint64(5), mock.Anything).
+		expectRWSet("ns1", "c1", []byte("rws-pre-image")).Return(nil)
+	fetcher := &fetcherMock{t: t}
+	coordinator := NewCoordinator(Support{
+		CollectionStore: cs,
+		Committer:       committer,
+		Fetcher:         fetcher,
+		TransientStore:  store,
+		Validator:       &validatorMock{},
+	}, common.SignedData{})
+	pvtData := (&pvtDataFactory{}).addRWSet().addNSRWSet("ns1", "c1").create()
+	// Green path: ledger height can be retrieved from ledger/committer
+	err := coordinator.StorePvtData("tx1", pvtData[0].WriteSet)
+	assert.NoError(t, err)
+
+	// Bad path: ledger height cannot be retrieved from ledger/committer
+	committer.On("LedgerHeight").Return(uint64(0), errors.New("I/O error: file system full"))
+	err = coordinator.StorePvtData("tx1", pvtData[0].WriteSet)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "I/O error: file system full")
 }

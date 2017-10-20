@@ -33,13 +33,13 @@ type CollectionAccessPolicy interface {
 	// AccessFilter returns a member filter function for a collection
 	AccessFilter() Filter
 
-	// RequiredExternalPeerCount returns the minimum number of external peers
+	// RequiredPeerCount returns the minimum number of peers
 	// required to send private data to
-	RequiredExternalPeerCount() int
+	RequiredPeerCount() int
 
-	// RequiredExternalPeerCount returns the minimum number of internal peers
-	// required to send private data to
-	RequiredInternalPeerCount() int
+	// MemberOrgs returns the collection's members as MSP IDs. This serves as
+	// a human-readable way of quickly identifying who is part of a collection.
+	MemberOrgs() []string
 }
 
 // Filter defines a rule that filters peers according to data signed by them.

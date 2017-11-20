@@ -14,7 +14,7 @@ const (
 	applicationTypeName = "Application"
 
 	// ApplicationV1_1 is the capabilties string for standard new non-backwards compatible fabric v1.1 application capabilities.
-	ApplicationV1_1 = "V1.1"
+	ApplicationV1_1 = "V1_1"
 )
 
 // ApplicationProvider provides capabilities information for application level config.
@@ -50,5 +50,11 @@ func (ap *ApplicationProvider) HasCapability(capability string) bool {
 // LifecycleViaConfig returns true if chaincode lifecycle should be managed via the resources config
 // tree rather than via the deprecated v1.0 endorser tx mechanism.
 func (ap *ApplicationProvider) LifecycleViaConfig() bool {
+	return ap.v11
+}
+
+// ForbidDuplicateTXIdInBlock specifies whether two transactions with the same TXId are permitted
+// in the same block or whether we mark the second one as TxValidationCode_DUPLICATE_TXID
+func (ap *ApplicationProvider) ForbidDuplicateTXIdInBlock() bool {
 	return ap.v11
 }

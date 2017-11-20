@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 
 	cf "github.com/hyperledger/fabric/core/config"
+	"github.com/hyperledger/fabric/msp"
 )
 
 const (
@@ -54,7 +55,7 @@ const (
 	// SampleSingleMSPSoloProfile references the sample profile which includes only the sample MSP and uses solo for ordering.
 	SampleSingleMSPSoloProfile = "SampleSingleMSPSolo"
 	// SampleSingleMSPSoloV11Profile references the sample profile which includes only the sample MSP with v1.1 capabilities defined and uses solo for ordering.
-	SampleSingleMSPSoloV11Profile = "SampleSingleMSPSoloV1.1"
+	SampleSingleMSPSoloV11Profile = "SampleSingleMSPSoloV1_1"
 
 	// SampleInsecureKafkaProfile references the sample profile which does not include any MSPs and uses Kafka for ordering.
 	SampleInsecureKafkaProfile = "SampleInsecureKafka"
@@ -62,11 +63,13 @@ const (
 	SampleDevModeKafkaProfile = "SampleDevModeKafka"
 	// SampleSingleMSPKafkaProfile references the sample profile which includes only the sample MSP and uses Kafka for ordering.
 	SampleSingleMSPKafkaProfile = "SampleSingleMSPKafka"
-	// SampleSingleMSPKafkaV11Profile references the sample profile which includes only the sample MSPwith v1.1 capabilities defined  and uses Kafka for ordering.
-	SampleSingleMSPKafkaV11Profile = "SampleSingleMSPKafkaV1.1"
+	// SampleSingleMSPKafkaV11Profile references the sample profile which includes only the sample MSP with v1.1 capabilities defined and uses Kafka for ordering.
+	SampleSingleMSPKafkaV11Profile = "SampleSingleMSPKafkaV1_1"
 
 	// SampleSingleMSPChannelProfile references the sample profile which includes only the sample MSP and is used to create a channel
 	SampleSingleMSPChannelProfile = "SampleSingleMSPChannel"
+	// SampleSingleMSPChannelV11Profile references the sample profile which includes only the sample MSP with v1.1 capabilities and is used to create a channel
+	SampleSingleMSPChannelV11Profile = "SampleSingleMSPChannelV1_1"
 
 	// SampleConsortiumName is the sample consortium from the sample configtx.yaml
 	SampleConsortiumName = "SampleConsortium"
@@ -113,6 +116,7 @@ type Organization struct {
 	Name           string `yaml:"Name"`
 	ID             string `yaml:"ID"`
 	MSPDir         string `yaml:"MSPDir"`
+	MSPType        string `yaml:"MSPType"`
 	AdminPrincipal string `yaml:"AdminPrincipal"`
 
 	// Note: Viper deserialization does not seem to care for
@@ -277,6 +281,11 @@ func (p *Profile) completeInitialization(configDir string) {
 }
 
 func (org *Organization) completeInitialization(configDir string) {
+	// set the MSP type; if none is specified we assume BCCSP
+	if org.MSPType == "" {
+		org.MSPType = msp.ProviderTypeToString(msp.FABRIC)
+	}
+
 	if org.AdminPrincipal == "" {
 		org.AdminPrincipal = AdminRoleAdminPrincipal
 	}

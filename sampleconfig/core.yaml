@@ -199,7 +199,7 @@ peer:
             # and the private data residing inside the transient store that is guaranteed not to be purged.
             # Private data is purged from the transient store when blocks with sequences that are multiples
             # of transientstoreMaxBlockRetention are committed.
-            transientstoreMaxBlockRetention: 500
+            transientstoreMaxBlockRetention: 1000
 
     # EventHub related configuration
     events:
@@ -223,13 +223,27 @@ peer:
     # Note that peer-chaincode connections through chaincodeListenAddress is
     # not mutual TLS auth. See comments on chaincodeListenAddress for more info
     tls:
+        # require server-side TLS
         enabled:  false
+        # require client certificates / mutual TLS.
+        # note that clients that are not configured to use a certificate will
+        # fail to connect to the peer.
+        clientAuthRequired: false
+        # X.509 certificate used for TLS server (and client if clientAuthEnabled
+        # is set to true
         cert:
             file: tls/server.crt
+        # private key used for TLS server (and client if clientAuthEnabled
+        # is set to true
         key:
             file: tls/server.key
+        # trusted root certificate chain for tls.cert
         rootcert:
             file: tls/ca.crt
+        # set of root certificate authorities used to verify client certificates
+        clientRootCAs:
+            files:
+              - tls/ca.crt
 
         # The server name use to verify the hostname returned by TLS handshake
         serverhostoverride:
@@ -266,6 +280,12 @@ peer:
     # that this peer is a member of. Otherwise this peer's messages
     # will not be identified as valid by other nodes.
     localMspId: DEFAULT
+
+    # Delivery service related config
+    deliveryclient:
+        # It sets the total time the delivery service may spend in reconnection
+        # attempts until its retry logic gives up and returns an error
+        reconnectTotalTimeThreshold: 3600s
 
     # Used with Go profiling tools only in none production environment. In
     # production, it should be disabled (eg enabled: false)
@@ -385,6 +405,9 @@ chaincode:
         # golang will never need more than baseos
         runtime: $(BASE_DOCKER_NS)/fabric-baseos:$(ARCH)-$(BASE_VERSION)
 
+        # whether or not golang chaincode should be linked dynamically
+        dynamicLink: false
+
     car:
         # car may need more facilities (JVM, etc) in the future as the catalog
         # of platforms are expanded.  For now, we can just use baseos
@@ -439,6 +462,20 @@ chaincode:
         vscc: enable
         qscc: enable
         rscc: disable
+
+    # System chaincode plugins: in addition to being imported and compiled
+    # into fabric through core/chaincode/importsysccs.go, system chaincodes
+    # can also be loaded as shared objects compiled as Go plugins.
+    # See examples/plugins/scc for an example.
+    # Like regular system chaincodes, plugins must also be white listed in the
+    # chaincode.system section above.
+    systemPlugins:
+      # example configuration:
+      # - enabled: true
+      #   name: myscc
+      #   path: /opt/lib/myscc.so
+      #   invokableExternal: true
+      #   invokableCC2CC: true
 
     # Logging section for the chaincode container
     logging:
@@ -495,3 +532,37 @@ ledger:
     # All history 'index' will be stored in goleveldb, regardless if using
     # CouchDB or alternate database for the state.
     enableHistoryDatabase: true
+
+###############################################################################
+#
+#    Metrics section
+#
+#
+###############################################################################
+metrics:
+        # enable or disable metrics server
+        enabled: false
+
+        # when enable metrics server, must specific metrics reporter type
+        # currently supported type: "statsd","prom"
+        reporter: statsd
+
+        # determines frequency of report metrics(unit: second)
+        interval: 1s
+
+        statsdReporter:
+
+              # statsd server address to connect
+              address: 0.0.0.0:8125
+
+              # determines frequency of push metrics to statsd server(unit: second)
+              flushInterval: 2s
+
+              # max size bytes for each push metrics request
+              # intranet recommend 1432 and internet recommend 512
+              flushBytes: 1432
+
+        promReporter:
+
+              # prometheus http server listen address for pull metrics
+              listenAddress: 0.0.0.0:8080

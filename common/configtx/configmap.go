@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2017 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package configtx
@@ -133,7 +123,7 @@ func recurseConfigMap(path string, configMap map[string]comparable) (*cb.ConfigG
 	newConfigGroup := cb.NewConfigGroup()
 	proto.Merge(newConfigGroup, group.ConfigGroup)
 
-	for key, _ := range group.Groups {
+	for key := range group.Groups {
 		updatedGroup, err := recurseConfigMap(path+PathSeparator+key, configMap)
 		if err != nil {
 			return nil, err
@@ -141,7 +131,7 @@ func recurseConfigMap(path string, configMap map[string]comparable) (*cb.ConfigG
 		newConfigGroup.Groups[key] = updatedGroup
 	}
 
-	for key, _ := range group.Values {
+	for key := range group.Values {
 		valuePath := ValuePrefix + path + PathSeparator + key
 		value, ok := configMap[valuePath]
 		if !ok {
@@ -153,7 +143,7 @@ func recurseConfigMap(path string, configMap map[string]comparable) (*cb.ConfigG
 		newConfigGroup.Values[key] = proto.Clone(value.ConfigValue).(*cb.ConfigValue)
 	}
 
-	for key, _ := range group.Policies {
+	for key := range group.Policies {
 		policyPath := PolicyPrefix + path + PathSeparator + key
 		policy, ok := configMap[policyPath]
 		if !ok {

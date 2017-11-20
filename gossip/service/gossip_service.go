@@ -44,7 +44,7 @@ type GossipService interface {
 	// DistributePrivateData distributes private data to the peers in the collections
 	// according to policies induced by the PolicyStore and PolicyParser
 	DistributePrivateData(chainID string, txID string, privateData *rwset.TxPvtReadWriteSet) error
-	// NewConfigEventer creates a ConfigProcessor which the configtx.Manager can ultimately route config updates to
+	// NewConfigEventer creates a ConfigProcessor which the channelconfig.BundleSource can ultimately route config updates to
 	NewConfigEventer() ConfigProcessor
 	// InitializeChannel allocates the state provider and should be invoked once per channel per execution
 	InitializeChannel(chainID string, endpoints []string, support Support)
@@ -192,7 +192,7 @@ func (g *gossipServiceImpl) DistributePrivateData(chainID string, txID string, p
 	return nil
 }
 
-// NewConfigEventer creates a ConfigProcessor which the configtx.Manager can ultimately route config updates to
+// NewConfigEventer creates a ConfigProcessor which the channelconfig.BundleSource can ultimately route config updates to
 func (g *gossipServiceImpl) NewConfigEventer() ConfigProcessor {
 	return newConfigEventer(g)
 }
@@ -293,8 +293,8 @@ func (g *gossipServiceImpl) createSelfSignedData() common.SignedData {
 	}
 }
 
-// configUpdated constructs a joinChannelMessage and sends it to the gossipSvc
-func (g *gossipServiceImpl) configUpdated(config Config) {
+// updateAnchors constructs a joinChannelMessage and sends it to the gossipSvc
+func (g *gossipServiceImpl) updateAnchors(config Config) {
 	myOrg := string(g.secAdv.OrgByPeerIdentity(api.PeerIdentityType(g.peerIdentity)))
 	if !g.amIinChannel(myOrg, config) {
 		logger.Error("Tried joining channel", config.ChainID(), "but our org(", myOrg, "), isn't "+
@@ -317,6 +317,17 @@ func (g *gossipServiceImpl) configUpdated(config Config) {
 	// Initialize new state provider for given committer
 	logger.Debug("Creating state provider for chainID", config.ChainID())
 	g.JoinChan(jcm, gossipCommon.ChainID(config.ChainID()))
+}
+
+func (g *gossipServiceImpl) updateEndpoints(chainID string, endpoints []string) {
+	if ds, ok := g.deliveryService[chainID]; ok {
+		logger.Debugf("Updating endpoints for chainID", chainID)
+		if err := ds.UpdateEndpoints(chainID, endpoints); err != nil {
+			// The only reason to fail is because of absence of block provider
+			// for given channel id, hence printing a warning will be enough
+			logger.Warningf("Failed to update ordering service endpoints, due to %s", err)
+		}
+	}
 }
 
 // AddPayload appends message payload to for given chain

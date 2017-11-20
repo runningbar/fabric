@@ -144,9 +144,9 @@ func serve(args []string) error {
 
 	if secureConfig.UseTLS {
 		logger.Info("Starting peer with TLS enabled")
-		// set up CA support
-		caSupport := comm.GetCASupport()
-		caSupport.ServerRootCAs = secureConfig.ServerRootCAs
+		// set up credential support
+		cs := comm.GetCredentialSupport()
+		cs.ServerRootCAs = secureConfig.ServerRootCAs
 	}
 
 	//TODO - do we need different SSL material for events ?
@@ -176,7 +176,7 @@ func serve(args []string) error {
 		return service.GetGossipService().DistributePrivateData(channel, txID, privateData)
 	}
 
-	serverEndorser := endorser.NewEndorserServer(privDataDist)
+	serverEndorser := endorser.NewEndorserServer(privDataDist, &endorser.SupportImpl{})
 	libConf := library.Config{}
 	if err = viperutil.EnhancedExactUnmarshalKey("peer.handlers", &libConf); err != nil {
 		return errors.WithMessage(err, "could not load YAML config")
@@ -210,8 +210,8 @@ func serve(args []string) error {
 		dialOpts = append(dialOpts, comm.ClientKeepaliveOptions()...)
 
 		if comm.TLSEnabled() {
-			tlsCert := peerServer.ServerCertificate()
-			dialOpts = append(dialOpts, grpc.WithTransportCredentials(comm.GetCASupport().GetPeerCredentials(tlsCert)))
+			comm.GetCredentialSupport().ClientCert = peerServer.ServerCertificate()
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(comm.GetCredentialSupport().GetPeerCredentials()))
 		} else {
 			dialOpts = append(dialOpts, grpc.WithInsecure())
 		}

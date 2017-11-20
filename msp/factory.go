@@ -48,13 +48,15 @@ func New(opts NewOpts) (MSP, error) {
 	case *BCCSPNewOpts:
 		switch opts.GetVersion() {
 		case MSPv1_0:
-			return newBccspMsp()
+			return newBccspMsp(MSPv1_0)
+		case MSPv1_1:
+			return newBccspMsp(MSPv1_1)
 		default:
 			return nil, errors.Errorf("Invalid *BCCSPNewOpts. Version not recognized [%v]", opts.GetVersion())
 		}
 	case *IdemixNewOpts:
 		switch opts.GetVersion() {
-		case MSPv1_0:
+		case MSPv1_1:
 			return newIdemixMsp()
 		default:
 			return nil, errors.Errorf("Invalid *IdemixNewOpts. Version not recognized [%v]", opts.GetVersion())

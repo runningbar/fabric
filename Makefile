@@ -95,7 +95,8 @@ PROJECT_FILES = $(shell git ls-files  | grep -v ^test | grep -v ^unit-test | \
 	grep -v ^.git | grep -v ^examples | grep -v ^devenv | grep -v .png$ | \
 	grep -v ^LICENSE )
 RELEASE_TEMPLATES = $(shell git ls-files | grep "release/templates")
-IMAGES = peer orderer ccenv javaenv buildenv testenv zookeeper kafka couchdb tools
+#IMAGES = peer orderer ccenv javaenv buildenv testenv zookeeper kafka couchdb tools
+IMAGES = peer orderer ccenv buildenv zookeeper kafka tools
 RELEASE_PLATFORMS = windows-amd64 darwin-amd64 linux-amd64 linux-ppc64le linux-s390x
 RELEASE_PKGS = configtxgen cryptogen configtxlator peer orderer
 
@@ -109,7 +110,7 @@ pkgmap.cryptogen      := $(PKGNAME)/common/tools/cryptogen
 
 include docker-env.mk
 
-all: native docker checks
+all: native docker #checks
 
 checks: license spelling linter unit-test behave
 
@@ -200,7 +201,8 @@ linter: buildenv
 %/chaintool: Makefile
 	@echo "Installing chaintool"
 	@mkdir -p $(@D)
-	curl -fL $(CHAINTOOL_URL) > $@
+	#curl -fL $(CHAINTOOL_URL) > $@
+	cat /home/ubuntu/hyperledger-fabric-chaintool-1.0.1.jar > $@
 	chmod +x $@
 
 # We (re)build a package within a docker context but persist the $GOPATH/pkg
@@ -233,8 +235,8 @@ build/docker/gotools: gotools/Makefile
 		make install BINDIR=/opt/gotools/bin OBJDIR=/opt/gotools/obj
 
 # Both peer and peer-docker depend on ccenv and javaenv (all docker env images it supports).
-build/bin/peer: build/image/ccenv/$(DUMMY) build/image/javaenv/$(DUMMY)
-build/image/peer/$(DUMMY): build/image/ccenv/$(DUMMY) build/image/javaenv/$(DUMMY)
+build/bin/peer: build/image/ccenv/$(DUMMY) #build/image/javaenv/$(DUMMY)
+build/image/peer/$(DUMMY): build/image/ccenv/$(DUMMY) #build/image/javaenv/$(DUMMY)
 
 build/bin/%: $(PROJECT_FILES)
 	@mkdir -p $(@D)
